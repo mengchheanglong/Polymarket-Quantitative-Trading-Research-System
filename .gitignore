@@ -6,4 +6,4 @@ venv/
 *.egg-info/
 paper_trading.sqlite3
 *.sqlite3
-
+exports/

@@ -31,6 +31,9 @@ python -m src.main replay --strategy momentum
 python -m src.main backtest-report
 python -m src.main runs
 python -m src.main compare
+python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main dataset
+python -m src.main export --format csv --out exports
 ```
 
 Collect public data:
@@ -40,6 +43,25 @@ python -m src.main collect
 ```
 
 Public collection tries Coinbase first and Kraken second for BTC/ETH price data. It uses public Polymarket endpoints for market and orderbook data. If DNS or outbound internet fails, the command records a failed raw snapshot and suggests `collect --demo`.
+
+Observe public snapshots repeatedly without trading:
+
+```powershell
+python -m src.main observe --duration-minutes 5 --interval-seconds 15
+python -m src.main observe --cycles 3 --interval-seconds 0
+```
+
+Summarize the local dataset:
+
+```powershell
+python -m src.main dataset
+```
+
+Export local research data:
+
+```powershell
+python -m src.main export --format csv --out exports
+```
 
 Run one paper cycle after public or demo collection:
 
@@ -109,6 +131,18 @@ Delete all local research data:
 
 ```powershell
 python -m src.main reset --all
+```
+
+Suggested safe workflow:
+
+```powershell
+python -m src.main collect --demo
+python -m src.main run-paper --strategy momentum
+python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main dataset
+python -m src.main replay --strategy momentum
+python -m src.main compare
+python -m src.main export --format csv --out exports
 ```
 
 Run the paper-only pair-cost research skeleton:

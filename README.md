@@ -17,6 +17,9 @@ python -m src.main replay --strategy momentum
 python -m src.main backtest-report
 python -m src.main runs
 python -m src.main compare
+python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main dataset
+python -m src.main export --format csv --out exports
 ```
 
 ## What It Tracks
@@ -75,6 +78,43 @@ python -m src.main backtest-report
 The backtest report includes snapshot count, markets seen, opportunities, accepted fake trades, skipped opportunities, realized fake PnL, win rate, equity drawdown, position exposure, average edge, source coverage, and data quality metrics.
 
 Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
+
+## Observe And Dataset Building
+
+Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.
+
+```powershell
+python -m src.main observe --duration-minutes 5 --interval-seconds 15
+python -m src.main observe --cycles 3 --interval-seconds 0
+```
+
+Each cycle attempts public exchange prices and public Polymarket market/orderbook data. Recoverable network failures are recorded as failed raw snapshots and the loop continues.
+
+Summarize the local dataset:
+
+```powershell
+python -m src.main dataset
+```
+
+Export local research data to CSV:
+
+```powershell
+python -m src.main export --format csv --out exports
+```
+
+Exports include raw snapshot summaries, trades, skipped opportunities, runs, and equity snapshots. There are no wallet/private-key fields to export.
+
+Suggested safe workflow:
+
+```powershell
+python -m src.main collect --demo
+python -m src.main run-paper --strategy momentum
+python -m src.main observe --duration-minutes 5 --interval-seconds 15
+python -m src.main dataset
+python -m src.main replay --strategy momentum
+python -m src.main compare
+python -m src.main export --format csv --out exports
+```
 
 ## Runs And Experiments
 

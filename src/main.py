@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,10 +14,12 @@ from src.http_client import HttpError
 from src.models import Asset, OpportunityDecision, OrderBook, Signal
 from src.reports.backtest import build_backtest_report
 from src.reports.compare import build_strategy_comparison
+from src.reports.dataset import build_dataset_summary
 from src.reports.ledger import build_trade_ledger
 from src.reports.summary import build_report
 from src.safety import SafetyError, enforce_paper_only
 from src.simulator.engine import PaperTradingEngine
+from src.storage.export import export_csv
 from src.storage.sqlite import SQLiteStore
 from src.strategies.pair_cost_arbitrage import PairCostArbitrageStrategy
 from src.strategies.updown_momentum import MomentumUpDownStrategy
@@ -76,6 +79,14 @@ def main(argv: list[str] | None = None) -> int:
     reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
     reset_parser.add_argument("--paper-results", action="store_true", help="Delete paper runs, trades, opportunities, and equity only.")
     reset_parser.add_argument("--all", action="store_true", help="Delete paper results and collected snapshot data.")
+    observe_parser = subcommands.add_parser("observe", help="Collect public snapshots repeatedly without trading")
+    observe_parser.add_argument("--duration-minutes", type=float, default=None, help="Maximum observe duration.")
+    observe_parser.add_argument("--interval-seconds", type=float, default=15.0, help="Seconds between cycles.")
+    observe_parser.add_argument("--cycles", type=int, default=None, help="Maximum cycles, useful for tests.")
+    subcommands.add_parser("dataset", help="Summarize stored public/demo snapshots")
+    export_parser = subcommands.add_parser("export", help="Export local research data")
+    export_parser.add_argument("--format", choices=("csv",), default="csv")
+    export_parser.add_argument("--out", default="exports")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -106,6 +117,12 @@ def main(argv: list[str] | None = None) -> int:
             return compare(config)
         if args.command == "reset":
             return reset(config, args)
+        if args.command == "observe":
+            return observe(config, args)
+        if args.command == "dataset":
+            return dataset(config)
+        if args.command == "export":
+            return export_data(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -227,7 +244,7 @@ def collect(config: AgentConfig) -> int:
                 status="failed",
                 error_message=str(exc),
             )
-            raise
+            raise HttpError(f"public Polymarket collection failed: {exc}") from exc
         if not markets:
             print("No active short-duration BTC/ETH UP-DOWN markets discovered from public endpoints.")
             print("Use collect --demo or USE_MOCK_DATA=true for offline demo data.")
@@ -269,6 +286,26 @@ def collect(config: AgentConfig) -> int:
                 print(f"{market.asset.value} {market.slug} ends {market.window.end.isoformat()}")
     finally:
         store.close()
+    return 0
+
+
+def observe(config: AgentConfig, args) -> int:
+    cycles = _observe_cycles(args.duration_minutes, args.interval_seconds, args.cycles)
+    successes = 0
+    failures = 0
+    for index in range(cycles):
+        print(f"Observe cycle {index + 1}/{cycles}")
+        try:
+            collect(config)
+            successes += 1
+            print(f"Observe cycle {index + 1} complete.")
+        except HttpError as exc:
+            failures += 1
+            print(f"Observe cycle {index + 1} failed: {exc}", file=sys.stderr)
+            print("Continuing observe loop. Use collect --demo for offline data.", file=sys.stderr)
+        if index < cycles - 1 and args.interval_seconds > 0:
+            time.sleep(args.interval_seconds)
+    print(f"Observe complete. Successful cycles: {successes}; failed cycles: {failures}.")
     return 0
 
 
@@ -361,8 +398,23 @@ def replay(config: AgentConfig) -> int:
     store = SQLiteStore(config.database_path)
     try:
         current_prices, candle_source, markets, orderbook_source, settlement_prices = _load_replay_context(store)
-        if not current_prices or not markets:
-            print("No stored snapshots available for replay. Run collect --demo or collect first.")
+        if not current_prices:
+            print("Replay cannot run: no stored BTC/ETH price snapshots. Run observe, collect, or collect --demo first.")
+            return 1
+        if not markets:
+            print("Replay cannot run: no stored Polymarket markets. Observe may not have found UP/DOWN markets; use collect --demo for a complete offline dataset.")
+            return 1
+        missing_books = [
+            market.slug
+            for market in markets
+            if orderbook_source.orderbook(market.up_token_id) is None
+            or orderbook_source.orderbook(market.down_token_id) is None
+        ]
+        if missing_books and config.strategy == "pair-cost":
+            print(
+                "Replay cannot run pair-cost: missing stored orderbooks for "
+                + ", ".join(missing_books[:5])
+            )
             return 1
         run_id = store.start_run(
             strategy=config.strategy,
@@ -465,6 +517,27 @@ def reset(config: AgentConfig, args) -> int:
         return 1
     finally:
         store.close()
+
+
+def dataset(config: AgentConfig) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        print(build_dataset_summary(store))
+    finally:
+        store.close()
+    return 0
+
+
+def export_data(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        paths = export_csv(store, args.out)
+        print("Export complete.")
+        for path in paths:
+            print(str(path))
+    finally:
+        store.close()
+    return 0
 
 
 def _run_momentum(
@@ -696,6 +769,17 @@ def _replace_demo_flag(config: AgentConfig, value: bool) -> AgentConfig:
 
 def _replace_strategy(config: AgentConfig, value: str) -> AgentConfig:
     return AgentConfig(**{**config.__dict__, "strategy": value})
+
+
+def _observe_cycles(duration_minutes: float | None, interval_seconds: float, cycles: int | None) -> int:
+    if cycles is not None:
+        return max(0, cycles)
+    if duration_minutes is None:
+        return 1
+    if interval_seconds <= 0:
+        return 1
+    total_seconds = max(0.0, duration_minutes * 60.0)
+    return max(1, int((total_seconds + interval_seconds - 1) // interval_seconds))
 
 
 def _config_notes(config: AgentConfig) -> str:

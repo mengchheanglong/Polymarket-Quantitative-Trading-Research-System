@@ -16,6 +16,8 @@ Phase 1 is paper-only by design.
 - Public collection uses unauthenticated exchange and Polymarket endpoints only.
 - Replay mode reads stored SQLite snapshots and does not call external APIs.
 - Backtest reporting summarizes stored snapshots, fake trades, and data quality only.
+- Observe mode only collects public snapshots. It never simulates trades or executes trades.
+- Export writes local research CSV files only. There are no wallet, private-key, signer, or credential columns.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.

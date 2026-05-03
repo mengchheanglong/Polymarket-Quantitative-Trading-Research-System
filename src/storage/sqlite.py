@@ -668,6 +668,46 @@ class SQLiteStore:
     def raw_snapshot_rows(self) -> list[sqlite3.Row]:
         return self.rows("SELECT * FROM raw_snapshots ORDER BY observed_at, id")
 
+    def dataset_summary(self) -> dict[str, Any]:
+        rows = self.raw_snapshot_rows()
+        first = rows[0]["observed_at"] if rows else "n/a"
+        latest = rows[-1]["observed_at"] if rows else "n/a"
+        type_counts = {
+            str(row["snapshot_type"]): int(row["count"])
+            for row in self.rows(
+                """
+                SELECT snapshot_type, COUNT(*) AS count
+                FROM raw_snapshots
+                GROUP BY snapshot_type
+                ORDER BY snapshot_type
+                """
+            )
+        }
+        failed = self.rows("SELECT COUNT(*) AS count FROM raw_snapshots WHERE status != 'ok'")[0]["count"]
+        assets = [
+            str(row["asset"])
+            for row in self.rows(
+                "SELECT DISTINCT asset FROM raw_snapshots WHERE asset IS NOT NULL ORDER BY asset"
+            )
+        ]
+        market_rows = self.rows("SELECT market_slug FROM collected_markets ORDER BY market_slug")
+        quality = self.data_quality_metrics()
+        return {
+            "total_snapshots": len(rows),
+            "exchange_price_snapshots": type_counts.get("exchange_price", 0),
+            "market_snapshots": type_counts.get("market_metadata", 0),
+            "orderbook_snapshots": type_counts.get("orderbook", 0),
+            "failed_snapshots": int(failed),
+            "first_snapshot": first,
+            "latest_snapshot": latest,
+            "assets_seen": assets,
+            "markets_seen": [str(row["market_slug"]) for row in market_rows],
+            "missing_prices": quality["missing_prices"],
+            "missing_orderbooks": quality["missing_orderbooks"],
+            "stale_snapshots": quality["stale_snapshots"],
+            "source_coverage": quality["source_coverage"],
+        }
+
     def data_quality_metrics(self, stale_seconds: int = 900, wide_spread: float = 0.10) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         raw_rows = self.raw_snapshot_rows()
