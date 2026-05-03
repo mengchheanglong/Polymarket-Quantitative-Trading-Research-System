@@ -3,9 +3,11 @@ from __future__ import annotations
 from src.storage.sqlite import SQLiteStore
 
 
-def build_trade_ledger(store: SQLiteStore) -> str:
+def build_trade_ledger(store: SQLiteStore, run_id: str | None = None) -> str:
     lines = ["Simulated trade ledger"]
-    trade_rows = store.trade_rows()
+    if run_id:
+        lines.append(f"Run: {run_id}")
+    trade_rows = store.trade_rows(run_id=run_id)
     if trade_rows:
         lines.append("Trades:")
         for row in trade_rows:
@@ -30,7 +32,7 @@ def build_trade_ledger(store: SQLiteStore) -> str:
     else:
         lines.append("Trades: none")
 
-    skipped_rows = store.skipped_opportunity_rows()
+    skipped_rows = store.skipped_opportunity_rows(run_id=run_id)
     if skipped_rows:
         lines.append("Skipped opportunities:")
         for row in skipped_rows:

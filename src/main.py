@@ -12,6 +12,7 @@ from src.config import AgentConfig, load_config
 from src.http_client import HttpError
 from src.models import Asset, OpportunityDecision, OrderBook, Signal
 from src.reports.backtest import build_backtest_report
+from src.reports.compare import build_strategy_comparison
 from src.reports.ledger import build_trade_ledger
 from src.reports.summary import build_report
 from src.safety import SafetyError, enforce_paper_only
@@ -46,8 +47,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Paper strategy to simulate.",
     )
-    subcommands.add_parser("report", help="Summarize fake trading results")
-    subcommands.add_parser("trades", help="Show simulated trades and skipped opportunities")
+    run_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
+    report_parser = subcommands.add_parser("report", help="Summarize fake trading results")
+    report_parser.add_argument("--latest", action="store_true", help="Report only the latest run.")
+    report_parser.add_argument("--all", action="store_true", help="Report all runs combined.")
+    report_parser.add_argument("--run-id", help="Report a specific run.")
+    report_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Report runs for a strategy.")
+    trades_parser = subcommands.add_parser("trades", help="Show simulated trades and skipped opportunities")
+    trades_parser.add_argument("--run-id", help="Show ledger for a specific run.")
+    trades_parser.add_argument("--all", action="store_true", help="Show ledger for all runs.")
     replay_parser = subcommands.add_parser("replay", help="Replay stored snapshots without external APIs")
     replay_parser.add_argument(
         "--strategy",
@@ -55,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Paper strategy to replay.",
     )
+    replay_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
     backtest_parser.add_argument(
         "--strategy",
@@ -62,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Strategy label to show in the report.",
     )
+    subcommands.add_parser("runs", help="List experiment runs")
+    subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
+    reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
+    reset_parser.add_argument("--paper-results", action="store_true", help="Delete paper runs, trades, opportunities, and equity only.")
+    reset_parser.add_argument("--all", action="store_true", help="Delete paper results and collected snapshot data.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -79,13 +93,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run-paper":
             return run_paper(config)
         if args.command == "report":
-            return report(config)
+            return report(config, args)
         if args.command == "trades":
-            return trades(config)
+            return trades(config, args)
         if args.command == "replay":
             return replay(config)
         if args.command == "backtest-report":
             return backtest_report(config)
+        if args.command == "runs":
+            return runs(config)
+        if args.command == "compare":
+            return compare(config)
+        if args.command == "reset":
+            return reset(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -256,8 +276,16 @@ def run_paper(config: AgentConfig) -> int:
     now = datetime.now(timezone.utc)
     store = SQLiteStore(config.database_path)
     try:
-        engine = PaperTradingEngine(config, store)
         mode = _effective_data_mode(config, store)
+        run_id = store.start_run(
+            strategy=config.strategy,
+            mode="paper",
+            data_source=mode,
+            starting_balance=config.starting_balance,
+            now=now,
+            notes=_config_notes(config),
+        )
+        engine = PaperTradingEngine(config, store, run_id=run_id)
         current_prices, candle_source, markets, orderbook_source, settlement_source = _load_run_context(
             config,
             store,
@@ -268,6 +296,7 @@ def run_paper(config: AgentConfig) -> int:
         if not markets:
             print("No tradeable markets found. Recorded prices only.")
             print(f"Closed expired fake positions: {closed}")
+            store.finish_run(run_id, now)
             return 0
 
         engine.record_equity(now)
@@ -289,27 +318,39 @@ def run_paper(config: AgentConfig) -> int:
             }
             settlement_now = max(market.window.end for market in markets)
             closed += engine.close_expired(settlement_prices, now=settlement_now)
+            now = settlement_now
 
+        store.finish_run(run_id, now)
         print(f"Paper cycle complete. Accepted fake trades: {accepted}; skipped: {skipped}; closed: {closed}.")
-        print(f"Fake balance: ${store.current_balance(default=config.starting_balance):.2f}")
+        print(f"Run ID: {run_id}")
+        print(f"Fake balance: ${store.current_balance(default=config.starting_balance, run_id=run_id):.2f}")
     finally:
         store.close()
     return 0
 
 
-def report(config: AgentConfig) -> int:
+def report(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        print(build_report(store, config.starting_balance).as_text())
+        print(
+            build_report(
+                store,
+                config.starting_balance,
+                run_id=getattr(args, "run_id", None),
+                strategy=getattr(args, "strategy", None),
+                all_runs=bool(getattr(args, "all", False)),
+            ).as_text()
+        )
     finally:
         store.close()
     return 0
 
 
-def trades(config: AgentConfig) -> int:
+def trades(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        print(build_trade_ledger(store))
+        run_id = None if getattr(args, "all", False) else (getattr(args, "run_id", None) or store.latest_run_id())
+        print(build_trade_ledger(store, run_id=run_id))
     finally:
         store.close()
     return 0
@@ -319,11 +360,19 @@ def replay(config: AgentConfig) -> int:
     now = datetime.now(timezone.utc)
     store = SQLiteStore(config.database_path)
     try:
-        engine = PaperTradingEngine(config, store)
         current_prices, candle_source, markets, orderbook_source, settlement_prices = _load_replay_context(store)
         if not current_prices or not markets:
             print("No stored snapshots available for replay. Run collect --demo or collect first.")
             return 1
+        run_id = store.start_run(
+            strategy=config.strategy,
+            mode="replay",
+            data_source="replay",
+            starting_balance=config.starting_balance,
+            now=now,
+            notes=_config_notes(config),
+        )
+        engine = PaperTradingEngine(config, store, run_id=run_id)
         engine.record_equity(now)
         if config.strategy == "pair-cost":
             accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
@@ -340,11 +389,14 @@ def replay(config: AgentConfig) -> int:
         if settlement_prices:
             settlement_now = max(market.window.end for market in markets)
             closed = engine.close_expired(settlement_prices, now=settlement_now)
+            now = settlement_now
         store.set_state("last_replay_strategy", config.strategy, now)
+        store.finish_run(run_id, now)
         print(
             f"Replay complete. Strategy: {config.strategy}; accepted fake trades: {accepted}; "
             f"skipped: {skipped}; closed: {closed}."
         )
+        print(f"Run ID: {run_id}")
     finally:
         store.close()
     return 0
@@ -358,6 +410,61 @@ def backtest_report(config: AgentConfig) -> int:
     finally:
         store.close()
     return 0
+
+
+def runs(config: AgentConfig) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        rows = store.run_rows()
+        print("Runs")
+        if not rows:
+            print("No runs found.")
+            return 0
+        for row in rows:
+            print(
+                " | ".join(
+                    [
+                        str(row["run_id"]),
+                        f"strategy={row['strategy']}",
+                        f"mode={row['mode']}",
+                        f"data_source={row['data_source']}",
+                        f"started={row['started_at']}",
+                        f"ending_balance={_fmt_money(row['ending_balance'])}",
+                        f"realized_pnl={_fmt_money(row['realized_pnl'])}",
+                        f"accepted={row['accepted_trade_count']}",
+                        f"skipped={row['skipped_opportunity_count']}",
+                    ]
+                )
+            )
+    finally:
+        store.close()
+    return 0
+
+
+def compare(config: AgentConfig) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        print(build_strategy_comparison(store))
+    finally:
+        store.close()
+    return 0
+
+
+def reset(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        if getattr(args, "all", False):
+            store.reset_all()
+            print("Reset all research data, including raw snapshots.")
+            return 0
+        if getattr(args, "paper_results", False):
+            store.reset_paper_results()
+            print("Reset paper results. Raw snapshots were preserved.")
+            return 0
+        print("Choose --paper-results or --all.")
+        return 1
+    finally:
+        store.close()
 
 
 def _run_momentum(
@@ -589,6 +696,20 @@ def _replace_demo_flag(config: AgentConfig, value: bool) -> AgentConfig:
 
 def _replace_strategy(config: AgentConfig, value: str) -> AgentConfig:
     return AgentConfig(**{**config.__dict__, "strategy": value})
+
+
+def _config_notes(config: AgentConfig) -> str:
+    return (
+        f"min_edge={config.min_edge}; fee_bps={config.fee_bps}; "
+        f"slippage_bps={config.slippage_bps}; max_position_pct={config.max_position_pct}; "
+        f"max_position_usd={config.max_position_usd}"
+    )
+
+
+def _fmt_money(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"${float(value):.2f}"
 
 
 class _StoredCandleSource:

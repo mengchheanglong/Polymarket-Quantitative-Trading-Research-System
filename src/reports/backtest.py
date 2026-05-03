@@ -8,6 +8,7 @@ from src.storage.sqlite import SQLiteStore
 
 @dataclass(frozen=True)
 class BacktestReport:
+    run_id: str | None
     strategy: str
     snapshots: int
     markets_seen: int
@@ -26,6 +27,7 @@ class BacktestReport:
         return "\n".join(
             [
                 "Backtest/replay report",
+                f"Run ID: {self.run_id or 'n/a'}",
                 f"Strategy: {self.strategy}",
                 f"Snapshots collected: {self.snapshots}",
                 f"Markets seen: {self.markets_seen}",
@@ -50,12 +52,32 @@ class BacktestReport:
 
 
 def build_backtest_report(store: SQLiteStore, starting_balance: float, strategy: str) -> BacktestReport:
-    report = build_report(store, starting_balance)
+    run_id = store.latest_run_id()
+    report = build_report(store, starting_balance, run_id=run_id) if run_id else build_report(store, starting_balance)
     quality = store.data_quality_metrics()
-    opportunities = store.rows("SELECT COUNT(*) AS count FROM opportunities")[0]["count"]
-    accepted = store.rows("SELECT COUNT(*) AS count FROM trades")[0]["count"]
+    if run_id:
+        opportunities = store.rows(
+            "SELECT COUNT(*) AS count FROM opportunities WHERE run_id = ?",
+            (run_id,),
+        )[0]["count"]
+        accepted = store.rows("SELECT COUNT(*) AS count FROM trades WHERE run_id = ?", (run_id,))[0]["count"]
+        skip_rows = store.rows(
+            """
+            SELECT reason, COUNT(*) AS count
+            FROM opportunities
+            WHERE run_id = ? AND decision = 'SKIP'
+            GROUP BY reason
+            ORDER BY count DESC, reason
+            """,
+            (run_id,),
+        )
+        quality = {**quality, "skipped_by_reason": {str(row["reason"]): int(row["count"]) for row in skip_rows}}
+    else:
+        opportunities = store.rows("SELECT COUNT(*) AS count FROM opportunities")[0]["count"]
+        accepted = store.rows("SELECT COUNT(*) AS count FROM trades")[0]["count"]
     markets = store.rows("SELECT COUNT(*) AS count FROM collected_markets")[0]["count"]
     return BacktestReport(
+        run_id=run_id,
         strategy=strategy,
         snapshots=quality["snapshots_collected"],
         markets_seen=int(markets),

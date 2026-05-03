@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from src.models import Candle, Market, OpportunityDecision, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
 
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
 );
 CREATE TABLE IF NOT EXISTS opportunities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
     observed_at TEXT NOT NULL,
     market_slug TEXT NOT NULL,
     asset TEXT NOT NULL,
@@ -33,6 +35,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
 );
 CREATE TABLE IF NOT EXISTS trades (
     trade_id TEXT PRIMARY KEY,
+    run_id TEXT,
     opened_at TEXT NOT NULL,
     closed_at TEXT,
     market_slug TEXT NOT NULL,
@@ -57,6 +60,7 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE TABLE IF NOT EXISTS bankroll (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
     observed_at TEXT NOT NULL,
     balance REAL NOT NULL
 );
@@ -103,6 +107,7 @@ CREATE TABLE IF NOT EXISTS app_state (
 );
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT,
     observed_at TEXT NOT NULL,
     cash_balance REAL NOT NULL,
     open_position_value REAL NOT NULL,
@@ -119,6 +124,22 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
     status TEXT NOT NULL,
     error_message TEXT
 );
+CREATE TABLE IF NOT EXISTS runs (
+    run_id TEXT PRIMARY KEY,
+    strategy TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    data_source TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    starting_balance REAL NOT NULL,
+    ending_balance REAL,
+    realized_pnl REAL,
+    max_equity_drawdown REAL,
+    max_position_exposure REAL,
+    accepted_trade_count INTEGER DEFAULT 0,
+    skipped_opportunity_count INTEGER DEFAULT 0,
+    notes TEXT
+);
 """
 
 
@@ -129,7 +150,14 @@ class SQLiteStore:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        for table in ("opportunities", "trades", "bankroll", "equity_snapshots"):
+            cols = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            if "run_id" not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -271,15 +299,111 @@ class SQLiteStore:
         row = self.conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
-    def log_opportunity(self, now: datetime, decision: OpportunityDecision) -> None:
+    def start_run(
+        self,
+        strategy: str,
+        mode: str,
+        data_source: str,
+        starting_balance: float,
+        now: datetime,
+        notes: str = "",
+    ) -> str:
+        run_id = str(uuid4())
+        self.conn.execute(
+            """
+            INSERT INTO runs
+                (run_id, strategy, mode, data_source, started_at, starting_balance, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, strategy, mode, data_source, _iso(now), starting_balance, notes),
+        )
+        self.conn.commit()
+        return run_id
+
+    def finish_run(self, run_id: str, now: datetime) -> None:
+        summary = self.run_summary(run_id)
+        self.conn.execute(
+            """
+            UPDATE runs
+            SET ended_at = ?, ending_balance = ?, realized_pnl = ?, max_equity_drawdown = ?,
+                max_position_exposure = ?, accepted_trade_count = ?, skipped_opportunity_count = ?
+            WHERE run_id = ?
+            """,
+            (
+                _iso(now),
+                summary["ending_balance"],
+                summary["realized_pnl"],
+                summary["max_equity_drawdown"],
+                summary["max_position_exposure"],
+                summary["accepted_trade_count"],
+                summary["skipped_opportunity_count"],
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def run_summary(self, run_id: str) -> dict[str, Any]:
+        run = self.run_by_id(run_id)
+        starting_balance = float(run["starting_balance"]) if run else 0.0
+        ending_balance = self.current_balance(default=starting_balance, run_id=run_id)
+        realized_pnl = sum(
+            float(row["pnl"] or 0.0)
+            for row in self.rows("SELECT pnl FROM trades WHERE status = 'CLOSED' AND run_id = ?", (run_id,))
+        )
+        equity_values = [
+            starting_balance,
+            *[
+                float(row["total_equity"])
+                for row in self.rows(
+                    "SELECT total_equity FROM equity_snapshots WHERE run_id = ? ORDER BY id",
+                    (run_id,),
+                )
+            ],
+        ]
+        exposure_values = [
+            float(row["position_exposure"])
+            for row in self.rows(
+                "SELECT position_exposure FROM equity_snapshots WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            )
+        ]
+        accepted = self.rows("SELECT COUNT(*) AS count FROM trades WHERE run_id = ?", (run_id,))[0]["count"]
+        skipped = self.rows(
+            "SELECT COUNT(*) AS count FROM opportunities WHERE run_id = ? AND decision = 'SKIP'",
+            (run_id,),
+        )[0]["count"]
+        return {
+            "ending_balance": ending_balance,
+            "realized_pnl": realized_pnl,
+            "max_equity_drawdown": _max_drawdown(equity_values),
+            "max_position_exposure": max(exposure_values, default=0.0),
+            "accepted_trade_count": int(accepted),
+            "skipped_opportunity_count": int(skipped),
+        }
+
+    def run_by_id(self, run_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+
+    def latest_run(self) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC, rowid DESC LIMIT 1").fetchone()
+
+    def run_rows(self) -> list[sqlite3.Row]:
+        return self.rows("SELECT * FROM runs ORDER BY started_at, rowid")
+
+    def latest_run_id(self) -> str | None:
+        row = self.latest_run()
+        return str(row["run_id"]) if row else None
+
+    def log_opportunity(self, now: datetime, decision: OpportunityDecision, run_id: str | None = None) -> None:
         self.conn.execute(
             """
             INSERT INTO opportunities
-                (observed_at, market_slug, asset, direction, probability, edge, market_price,
+                (run_id, observed_at, market_slug, asset, direction, probability, edge, market_price,
                  spread, decision, reason, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                run_id,
                 _iso(now),
                 decision.market.slug,
                 decision.market.asset.value,
@@ -295,17 +419,18 @@ class SQLiteStore:
         )
         self.conn.commit()
 
-    def open_trade(self, now: datetime, fill: Any) -> None:
+    def open_trade(self, now: datetime, fill: Any, run_id: str | None = None) -> None:
         self.conn.execute(
             """
             INSERT INTO trades
-                (trade_id, opened_at, market_slug, title, asset, direction, window_end,
+                (trade_id, run_id, opened_at, market_slug, title, asset, direction, window_end,
                  entry_price, shares, notional, entry_fee, slippage_cost, total_cost,
                  entry_underlying_price, status, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
             """,
             (
                 fill.trade_id,
+                run_id,
                 _iso(now),
                 fill.market.slug,
                 fill.market.title,
@@ -345,16 +470,20 @@ class SQLiteStore:
         )
         self.conn.commit()
 
-    def current_balance(self, default: float) -> float:
-        row = self.conn.execute(
-            "SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+    def current_balance(self, default: float, run_id: str | None = None) -> float:
+        if run_id is None:
+            row = self.conn.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT balance FROM bankroll WHERE run_id = ? ORDER BY id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
         return float(row["balance"]) if row else default
 
-    def set_balance(self, now: datetime, balance: float) -> None:
+    def set_balance(self, now: datetime, balance: float, run_id: str | None = None) -> None:
         self.conn.execute(
-            "INSERT INTO bankroll (observed_at, balance) VALUES (?, ?)",
-            (_iso(now), balance),
+            "INSERT INTO bankroll (run_id, observed_at, balance) VALUES (?, ?, ?)",
+            (run_id, _iso(now), balance),
         )
         self.conn.commit()
 
@@ -364,14 +493,16 @@ class SQLiteStore:
         cash_balance: float,
         open_position_value: float,
         position_exposure: float,
+        run_id: str | None = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT INTO equity_snapshots
-                (observed_at, cash_balance, open_position_value, total_equity, position_exposure)
-            VALUES (?, ?, ?, ?, ?)
+                (run_id, observed_at, cash_balance, open_position_value, total_equity, position_exposure)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
+                run_id,
                 _iso(now),
                 cash_balance,
                 open_position_value,
@@ -381,21 +512,39 @@ class SQLiteStore:
         )
         self.conn.commit()
 
-    def open_trades(self) -> list[sqlite3.Row]:
-        return list(self.conn.execute("SELECT * FROM trades WHERE status = 'OPEN'"))
+    def open_trades(self, run_id: str | None = None) -> list[sqlite3.Row]:
+        if run_id is None:
+            return list(self.conn.execute("SELECT * FROM trades WHERE status = 'OPEN'"))
+        return list(
+            self.conn.execute("SELECT * FROM trades WHERE status = 'OPEN' AND run_id = ?", (run_id,))
+        )
 
-    def trade_rows(self) -> list[sqlite3.Row]:
-        return list(self.conn.execute("SELECT * FROM trades ORDER BY opened_at, trade_id"))
-
-    def skipped_opportunity_rows(self) -> list[sqlite3.Row]:
+    def trade_rows(self, run_id: str | None = None) -> list[sqlite3.Row]:
+        if run_id is None:
+            return list(self.conn.execute("SELECT * FROM trades ORDER BY opened_at, trade_id"))
         return list(
             self.conn.execute(
-                """
+                "SELECT * FROM trades WHERE run_id = ? ORDER BY opened_at, trade_id",
+                (run_id,),
+            )
+        )
+
+    def skipped_opportunity_rows(self, run_id: str | None = None) -> list[sqlite3.Row]:
+        clause = ""
+        params: tuple[Any, ...] = ()
+        if run_id is not None:
+            clause = "AND run_id = ?"
+            params = (run_id,)
+        return list(
+            self.conn.execute(
+                f"""
                 SELECT observed_at, market_slug, asset, direction, market_price, spread, edge, reason
                 FROM opportunities
                 WHERE decision = 'SKIP'
+                {clause}
                 ORDER BY observed_at, id
-                """
+                """,
+                params,
             )
         )
 
@@ -574,6 +723,24 @@ class SQLiteStore:
             "source_coverage": {str(row["source_name"]): int(row["count"]) for row in coverage_rows},
         }
 
+    def reset_paper_results(self) -> None:
+        for table in ("trades", "opportunities", "bankroll", "equity_snapshots", "runs"):
+            self.conn.execute(f"DELETE FROM {table}")
+        self.conn.commit()
+
+    def reset_all(self) -> None:
+        self.reset_paper_results()
+        for table in (
+            "price_snapshots",
+            "candles",
+            "collected_markets",
+            "collected_orderbooks",
+            "raw_snapshots",
+            "app_state",
+        ):
+            self.conn.execute(f"DELETE FROM {table}")
+        self.conn.commit()
+
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return list(self.conn.execute(query, params))
 
@@ -584,6 +751,15 @@ def _iso(value: datetime) -> str:
 
 def _from_iso(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _max_drawdown(values: list[float]) -> float:
+    peak = values[0] if values else 0.0
+    max_dd = 0.0
+    for value in values:
+        peak = max(peak, value)
+        max_dd = max(max_dd, peak - value)
+    return max_dd
 
 
 def _size_for_price(levels: tuple[OrderLevel, ...], price: float | None) -> float | None:

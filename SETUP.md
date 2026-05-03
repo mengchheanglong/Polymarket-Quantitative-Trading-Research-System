@@ -29,6 +29,8 @@ python -m src.main report
 python -m src.main trades
 python -m src.main replay --strategy momentum
 python -m src.main backtest-report
+python -m src.main runs
+python -m src.main compare
 ```
 
 Collect public data:
@@ -74,6 +76,39 @@ Summarize replay/backtest and data quality:
 
 ```powershell
 python -m src.main backtest-report
+```
+
+List isolated experiment runs:
+
+```powershell
+python -m src.main runs
+```
+
+Compare strategies across stored runs:
+
+```powershell
+python -m src.main compare
+```
+
+Report scopes:
+
+```powershell
+python -m src.main report --latest
+python -m src.main report --run-id <run_id>
+python -m src.main report --strategy momentum
+python -m src.main report --all
+```
+
+Reset paper results while preserving raw snapshots:
+
+```powershell
+python -m src.main reset --paper-results
+```
+
+Delete all local research data:
+
+```powershell
+python -m src.main reset --all
 ```
 
 Run the paper-only pair-cost research skeleton:

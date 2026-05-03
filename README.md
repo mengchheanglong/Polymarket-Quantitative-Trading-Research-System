@@ -15,6 +15,8 @@ python -m src.main report
 python -m src.main trades
 python -m src.main replay --strategy momentum
 python -m src.main backtest-report
+python -m src.main runs
+python -m src.main compare
 ```
 
 ## What It Tracks
@@ -73,6 +75,44 @@ python -m src.main backtest-report
 The backtest report includes snapshot count, markets seen, opportunities, accepted fake trades, skipped opportunities, realized fake PnL, win rate, equity drawdown, position exposure, average edge, source coverage, and data quality metrics.
 
 Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
+
+## Runs And Experiments
+
+Every `run-paper` and `replay` command creates a new isolated run by default. Trades, skipped opportunities, fake balances, and equity snapshots are linked to that `run_id`, so momentum and pair-cost runs no longer get mixed accidentally.
+
+Inspect runs:
+
+```powershell
+python -m src.main runs
+```
+
+Reports default to the latest run:
+
+```powershell
+python -m src.main report
+python -m src.main report --latest
+python -m src.main report --run-id <run_id>
+python -m src.main report --strategy momentum
+python -m src.main report --all
+```
+
+Compare stored strategies without calling external APIs:
+
+```powershell
+python -m src.main compare
+```
+
+Reset paper results while keeping raw snapshots:
+
+```powershell
+python -m src.main reset --paper-results
+```
+
+Delete all local research data, including raw snapshots:
+
+```powershell
+python -m src.main reset --all
+```
 
 ## Data Modes
 

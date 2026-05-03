@@ -17,6 +17,9 @@ Phase 1 is paper-only by design.
 - Replay mode reads stored SQLite snapshots and does not call external APIs.
 - Backtest reporting summarizes stored snapshots, fake trades, and data quality only.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
+- Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
+- `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
+- `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.
 
 All simulated fills, balances, positions, and PnL are fake research records written to SQLite.
 

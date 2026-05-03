@@ -19,7 +19,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## Freqtrade
 
-- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, replay/reporting ergonomics, and clear separation between simulation and execution.
+- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, and clear separation between simulation and execution.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; later for richer backtesting design.
@@ -27,7 +27,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## NautilusTrader
 
-- Useful for: professional event-driven trading engine architecture, ledgers, fills, positions, risk controls, market-data boundaries, and future event replay design.
+- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, risk controls, market-data boundaries, and future event replay design.
 - Do not copy yet: broker adapters, live venues, account integrations, or execution clients.
 - Safety warning: this project should borrow concepts such as explicit events and accounting, not live connectivity.
 - Phase: Phase 3 as architectural inspiration for replay boundaries; later for richer event modeling.
