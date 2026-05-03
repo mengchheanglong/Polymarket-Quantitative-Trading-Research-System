@@ -1,0 +1,504 @@
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from src.models import Candle, Market, OpportunityDecision, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS price_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    price REAL NOT NULL,
+    source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS opportunities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    market_slug TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    probability REAL NOT NULL,
+    edge REAL NOT NULL,
+    market_price REAL,
+    spread REAL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    is_mock INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS trades (
+    trade_id TEXT PRIMARY KEY,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    market_slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    shares REAL NOT NULL,
+    notional REAL NOT NULL,
+    entry_fee REAL NOT NULL,
+    slippage_cost REAL NOT NULL,
+    total_cost REAL NOT NULL,
+    entry_underlying_price REAL NOT NULL,
+    exit_underlying_price REAL,
+    exit_price REAL,
+    exit_fee REAL,
+    pnl REAL,
+    result TEXT,
+    status TEXT NOT NULL,
+    is_mock INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bankroll (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    balance REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS candles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    candle_start TEXT NOT NULL,
+    low REAL NOT NULL,
+    high REAL NOT NULL,
+    open REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collected_markets (
+    market_slug TEXT PRIMARY KEY,
+    market_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    up_token_id TEXT NOT NULL,
+    down_token_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    is_mock INTEGER NOT NULL,
+    collected_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collected_orderbooks (
+    token_id TEXT PRIMARY KEY,
+    market_slug TEXT NOT NULL,
+    bid_price REAL,
+    bid_size REAL,
+    ask_price REAL,
+    ask_size REAL,
+    last_trade_price REAL,
+    is_mock INTEGER NOT NULL,
+    collected_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    cash_balance REAL NOT NULL,
+    open_position_value REAL NOT NULL,
+    total_equity REAL NOT NULL,
+    position_exposure REAL NOT NULL
+);
+"""
+
+
+class SQLiteStore:
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA)
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def log_price(self, snapshot: PriceSnapshot) -> None:
+        self.conn.execute(
+            "INSERT INTO price_snapshots (observed_at, asset, price, source) VALUES (?, ?, ?, ?)",
+            (
+                _iso(snapshot.timestamp),
+                snapshot.asset.value,
+                snapshot.price,
+                snapshot.source,
+            ),
+        )
+        self.conn.commit()
+
+    def log_candles(self, asset: str, candles: list[Candle], source: str, observed_at: datetime) -> None:
+        self.conn.executemany(
+            """
+            INSERT INTO candles
+                (observed_at, asset, candle_start, low, high, open, close, volume, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    _iso(observed_at),
+                    asset,
+                    _iso(candle.start),
+                    candle.low,
+                    candle.high,
+                    candle.open,
+                    candle.close,
+                    candle.volume,
+                    source,
+                )
+                for candle in candles
+            ],
+        )
+        self.conn.commit()
+
+    def replace_collected_market_data(
+        self,
+        now: datetime,
+        markets: list[Market],
+        orderbooks: dict[str, OrderBook],
+    ) -> None:
+        self.conn.execute("DELETE FROM collected_markets")
+        self.conn.execute("DELETE FROM collected_orderbooks")
+        self.conn.executemany(
+            """
+            INSERT INTO collected_markets
+                (market_slug, market_id, title, asset, window_start, window_end, up_token_id,
+                 down_token_id, source_url, is_mock, collected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    market.slug,
+                    market.market_id,
+                    market.title,
+                    market.asset.value,
+                    _iso(market.window.start),
+                    _iso(market.window.end),
+                    market.up_token_id,
+                    market.down_token_id,
+                    market.source_url,
+                    int(market.is_mock),
+                    _iso(now),
+                )
+                for market in markets
+            ],
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO collected_orderbooks
+                (token_id, market_slug, bid_price, bid_size, ask_price, ask_size, last_trade_price,
+                 is_mock, collected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    token_id,
+                    market.slug,
+                    book.best_bid,
+                    _size_for_price(book.bids, book.best_bid),
+                    book.best_ask,
+                    _size_for_price(book.asks, book.best_ask),
+                    book.last_trade_price,
+                    int(market.is_mock),
+                    _iso(now),
+                )
+                for market in markets
+                for token_id in (market.up_token_id, market.down_token_id)
+                for book in (orderbooks[token_id],)
+            ],
+        )
+        self.conn.commit()
+
+    def set_state(self, key: str, value: str, now: datetime) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, _iso(now)),
+        )
+        self.conn.commit()
+
+    def get_state(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return str(row["value"]) if row else None
+
+    def log_opportunity(self, now: datetime, decision: OpportunityDecision) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO opportunities
+                (observed_at, market_slug, asset, direction, probability, edge, market_price,
+                 spread, decision, reason, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _iso(now),
+                decision.market.slug,
+                decision.market.asset.value,
+                decision.signal.direction.value,
+                decision.signal.probability,
+                decision.signal.edge,
+                decision.market_price,
+                decision.spread,
+                decision.decision,
+                decision.reason,
+                int(decision.market.is_mock),
+            ),
+        )
+        self.conn.commit()
+
+    def open_trade(self, now: datetime, fill: Any) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO trades
+                (trade_id, opened_at, market_slug, title, asset, direction, window_end,
+                 entry_price, shares, notional, entry_fee, slippage_cost, total_cost,
+                 entry_underlying_price, status, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+            """,
+            (
+                fill.trade_id,
+                _iso(now),
+                fill.market.slug,
+                fill.market.title,
+                fill.market.asset.value,
+                fill.direction.value,
+                _iso(fill.market.window.end),
+                fill.entry_price,
+                fill.shares,
+                fill.notional,
+                fill.entry_fee,
+                fill.slippage_cost,
+                fill.notional + fill.entry_fee + fill.slippage_cost,
+                fill.entry_underlying_price,
+                int(fill.market.is_mock),
+            ),
+        )
+        self.conn.commit()
+
+    def close_trade(
+        self,
+        now: datetime,
+        trade_id: str,
+        exit_underlying_price: float,
+        exit_price: float,
+        exit_fee: float,
+        pnl: float,
+        result: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE trades
+            SET closed_at = ?, exit_underlying_price = ?, exit_price = ?, exit_fee = ?,
+                pnl = ?, result = ?, status = 'CLOSED'
+            WHERE trade_id = ?
+            """,
+            (_iso(now), exit_underlying_price, exit_price, exit_fee, pnl, result, trade_id),
+        )
+        self.conn.commit()
+
+    def current_balance(self, default: float) -> float:
+        row = self.conn.execute(
+            "SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return float(row["balance"]) if row else default
+
+    def set_balance(self, now: datetime, balance: float) -> None:
+        self.conn.execute(
+            "INSERT INTO bankroll (observed_at, balance) VALUES (?, ?)",
+            (_iso(now), balance),
+        )
+        self.conn.commit()
+
+    def log_equity_snapshot(
+        self,
+        now: datetime,
+        cash_balance: float,
+        open_position_value: float,
+        position_exposure: float,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO equity_snapshots
+                (observed_at, cash_balance, open_position_value, total_equity, position_exposure)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                _iso(now),
+                cash_balance,
+                open_position_value,
+                cash_balance + open_position_value,
+                position_exposure,
+            ),
+        )
+        self.conn.commit()
+
+    def open_trades(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM trades WHERE status = 'OPEN'"))
+
+    def trade_rows(self) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM trades ORDER BY opened_at, trade_id"))
+
+    def skipped_opportunity_rows(self) -> list[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT observed_at, market_slug, asset, direction, market_price, spread, edge, reason
+                FROM opportunities
+                WHERE decision = 'SKIP'
+                ORDER BY observed_at, id
+                """
+            )
+        )
+
+    def latest_prices(self, source_prefix: str | None = None) -> dict[str, PriceSnapshot]:
+        params: tuple[Any, ...] = ()
+        source_filter = ""
+        if source_prefix:
+            source_filter = "WHERE source LIKE ?"
+            params = (f"{source_prefix}%",)
+        rows = self.rows(
+            f"""
+            SELECT asset, price, observed_at, source
+            FROM price_snapshots
+            {source_filter}
+            ORDER BY observed_at DESC, id DESC
+            """,
+            params,
+        )
+        latest: dict[str, PriceSnapshot] = {}
+        for row in rows:
+            asset = str(row["asset"])
+            if asset in latest:
+                continue
+            latest[asset] = PriceSnapshot(
+                asset=asset_enum(asset),
+                price=float(row["price"]),
+                timestamp=_from_iso(str(row["observed_at"])),
+                source=str(row["source"]),
+            )
+        return latest
+
+    def recent_candles(
+        self,
+        asset: str,
+        limit: int = 5,
+        source_prefix: str | None = None,
+    ) -> list[Candle]:
+        params: list[Any] = [asset]
+        source_filter = ""
+        if source_prefix:
+            source_filter = "AND source LIKE ?"
+            params.append(f"{source_prefix}%")
+        rows = self.rows(
+            f"""
+            SELECT candle_start, low, high, open, close, volume
+            FROM candles
+            WHERE asset = ?
+            {source_filter}
+            ORDER BY candle_start DESC, id DESC
+            LIMIT ?
+            """,
+            tuple([*params, limit]),
+        )
+        candles = [
+            Candle(
+                start=_from_iso(str(row["candle_start"])),
+                low=float(row["low"]),
+                high=float(row["high"]),
+                open=float(row["open"]),
+                close=float(row["close"]),
+                volume=float(row["volume"]),
+            )
+            for row in rows
+        ]
+        return list(reversed(candles))
+
+    def collected_markets(self, mock_only: bool | None = None) -> list[Market]:
+        query = """
+            SELECT market_id, market_slug, title, asset, window_start, window_end,
+                   up_token_id, down_token_id, source_url, is_mock
+            FROM collected_markets
+        """
+        params: tuple[Any, ...] = ()
+        if mock_only is not None:
+            query += " WHERE is_mock = ?"
+            params = (1 if mock_only else 0,)
+        query += " ORDER BY window_end"
+        rows = self.rows(query, params)
+        return [
+            Market(
+                market_id=str(row["market_id"]),
+                slug=str(row["market_slug"]),
+                title=str(row["title"]),
+                asset=asset_enum(str(row["asset"])),
+                window=TimingWindow(
+                    start=_from_iso(str(row["window_start"])),
+                    end=_from_iso(str(row["window_end"])),
+                ),
+                up_token_id=str(row["up_token_id"]),
+                down_token_id=str(row["down_token_id"]),
+                source_url=str(row["source_url"]),
+                is_mock=bool(row["is_mock"]),
+            )
+            for row in rows
+        ]
+
+    def collected_orderbook(self, token_id: str) -> OrderBook | None:
+        row = self.conn.execute(
+            """
+            SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price
+            FROM collected_orderbooks
+            WHERE token_id = ?
+            """,
+            (token_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        bids = ()
+        asks = ()
+        if row["bid_price"] is not None and row["bid_size"] is not None:
+            bids = (OrderLevel(price=float(row["bid_price"]), size=float(row["bid_size"])),)
+        if row["ask_price"] is not None and row["ask_size"] is not None:
+            asks = (OrderLevel(price=float(row["ask_price"]), size=float(row["ask_size"])),)
+        return OrderBook(
+            token_id=str(row["token_id"]),
+            bids=bids,
+            asks=asks,
+            last_trade_price=float(row["last_trade_price"]) if row["last_trade_price"] is not None else None,
+        )
+
+    def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
+        return list(self.conn.execute(query, params))
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _from_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _size_for_price(levels: tuple[OrderLevel, ...], price: float | None) -> float | None:
+    if price is None:
+        return None
+    for level in levels:
+        if level.price == price:
+            return level.size
+    return None
+
+
+def asset_enum(value: str):
+    from src.models import Asset
+
+    return Asset(value)
