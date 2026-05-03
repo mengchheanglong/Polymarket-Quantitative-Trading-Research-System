@@ -27,6 +27,8 @@ python -m src.main collect --demo
 python -m src.main run-paper
 python -m src.main report
 python -m src.main trades
+python -m src.main replay --strategy momentum
+python -m src.main backtest-report
 ```
 
 Collect public data:
@@ -34,6 +36,8 @@ Collect public data:
 ```powershell
 python -m src.main collect
 ```
+
+Public collection tries Coinbase first and Kraken second for BTC/ETH price data. It uses public Polymarket endpoints for market and orderbook data. If DNS or outbound internet fails, the command records a failed raw snapshot and suggests `collect --demo`.
 
 Run one paper cycle after public or demo collection:
 
@@ -57,6 +61,19 @@ Show the simulated trade ledger:
 
 ```powershell
 python -m src.main trades
+```
+
+Replay stored snapshots without external APIs:
+
+```powershell
+python -m src.main replay --strategy momentum
+python -m src.main replay --strategy pair-cost
+```
+
+Summarize replay/backtest and data quality:
+
+```powershell
+python -m src.main backtest-report
 ```
 
 Run the paper-only pair-cost research skeleton:

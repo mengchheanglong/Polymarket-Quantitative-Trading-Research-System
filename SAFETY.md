@@ -12,7 +12,10 @@ Phase 1 is paper-only by design.
 - There are no Polymarket trading credential requirements.
 - The `.env.example` file contains only paper-trading configuration.
 - Demo mode is the recommended first smoke test because it works offline and never calls external APIs.
-- Public data collection can fail when DNS or network access is unavailable.
+- Public data collection can fail when DNS or network access is unavailable. Failures are recorded as raw snapshots and the CLI suggests demo mode.
+- Public collection uses unauthenticated exchange and Polymarket endpoints only.
+- Replay mode reads stored SQLite snapshots and does not call external APIs.
+- Backtest reporting summarizes stored snapshots, fake trades, and data quality only.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
 
 All simulated fills, balances, positions, and PnL are fake research records written to SQLite.
@@ -25,3 +28,5 @@ Report metrics are paper metrics only:
 - `Total fake equity` is fake cash plus marked open simulated position value.
 - `Max equity drawdown` is calculated from equity snapshots, not raw cash drawdown from opening positions.
 - `Max position exposure` is reported separately from drawdown.
+
+Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale data, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.

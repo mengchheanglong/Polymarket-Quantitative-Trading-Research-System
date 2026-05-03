@@ -13,6 +13,8 @@ python -m src.main collect --demo
 python -m src.main run-paper
 python -m src.main report
 python -m src.main trades
+python -m src.main replay --strategy momentum
+python -m src.main backtest-report
 ```
 
 ## What It Tracks
@@ -51,11 +53,33 @@ Inspect simulated trades and skipped opportunities:
 python -m src.main trades
 ```
 
+## Replay And Backtest Reports
+
+Phase 3 stores raw public/demo snapshots in SQLite, including exchange prices, Polymarket market metadata, orderbooks, collection status, and failed collection errors.
+
+Replay runs a selected paper strategy against stored snapshots only:
+
+```powershell
+python -m src.main replay --strategy momentum
+python -m src.main replay --strategy pair-cost
+```
+
+Backtest reporting summarizes the stored dataset and replay output:
+
+```powershell
+python -m src.main backtest-report
+```
+
+The backtest report includes snapshot count, markets seen, opportunities, accepted fake trades, skipped opportunities, realized fake PnL, win rate, equity drawdown, position exposure, average edge, source coverage, and data quality metrics.
+
+Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
+
 ## Data Modes
 
 Public collection uses only unauthenticated endpoints.
 
 - Coinbase Exchange public price data for BTC/ETH
+- Kraken public REST price data as a fallback
 - Polymarket public Gamma discovery endpoints
 - Polymarket public CLOB orderbook reads
 

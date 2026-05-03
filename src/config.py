@@ -37,6 +37,7 @@ class AgentConfig:
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
     coinbase_base_url: str = "https://api.exchange.coinbase.com"
+    kraken_base_url: str = "https://api.kraken.com"
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -82,4 +83,5 @@ def load_config() -> AgentConfig:
         coinbase_base_url=os.environ.get(
             "COINBASE_BASE_URL", "https://api.exchange.coinbase.com"
         ),
+        kraken_base_url=os.environ.get("KRAKEN_BASE_URL", "https://api.kraken.com"),
     )

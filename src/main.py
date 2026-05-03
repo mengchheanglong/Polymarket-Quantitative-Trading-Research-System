@@ -5,12 +5,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.collectors.exchange import CoinbaseCollector
+from src.collectors.exchange import CoinbaseCollector, FallbackExchangeCollector, KrakenCollector
 from src.collectors.mock_markets import MockMarketSource
 from src.collectors.polymarket import PolymarketPublicCollector
 from src.config import AgentConfig, load_config
 from src.http_client import HttpError
 from src.models import Asset, OpportunityDecision, OrderBook, Signal
+from src.reports.backtest import build_backtest_report
 from src.reports.ledger import build_trade_ledger
 from src.reports.summary import build_report
 from src.safety import SafetyError, enforce_paper_only
@@ -47,6 +48,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     subcommands.add_parser("report", help="Summarize fake trading results")
     subcommands.add_parser("trades", help="Show simulated trades and skipped opportunities")
+    replay_parser = subcommands.add_parser("replay", help="Replay stored snapshots without external APIs")
+    replay_parser.add_argument(
+        "--strategy",
+        choices=("momentum", "pair-cost"),
+        default=None,
+        help="Paper strategy to replay.",
+    )
+    backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
+    backtest_parser.add_argument(
+        "--strategy",
+        choices=("momentum", "pair-cost"),
+        default=None,
+        help="Strategy label to show in the report.",
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -67,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
             return report(config)
         if args.command == "trades":
             return trades(config)
+        if args.command == "replay":
+            return replay(config)
+        if args.command == "backtest-report":
+            return backtest_report(config)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -93,6 +112,14 @@ def collect(config: AgentConfig) -> int:
             }
             for snapshot in prices:
                 store.log_price(snapshot)
+                store.log_raw_snapshot(
+                    now,
+                    snapshot.source,
+                    snapshot.asset.value,
+                    "exchange_price",
+                    {"price": snapshot.price, "source": snapshot.source},
+                    status="ok",
+                )
                 store.log_candles(
                     asset=snapshot.asset.value,
                     candles=demo.recent_candles(snapshot.asset, now=now),
@@ -100,6 +127,16 @@ def collect(config: AgentConfig) -> int:
                     observed_at=now,
                 )
             store.replace_collected_market_data(now, markets, orderbooks)
+            _log_market_raw_snapshots(store, now, "mock:demo", markets, orderbooks, "ok")
+            for settlement in demo.settlement_prices(now=now):
+                store.log_raw_snapshot(
+                    settlement.timestamp,
+                    settlement.source,
+                    settlement.asset.value,
+                    "settlement_price",
+                    {"price": settlement.price, "source": settlement.source},
+                    status="ok",
+                )
             store.set_state("last_collection_mode", "demo", now)
             print("Collected deterministic demo dataset.")
             print(f"Inserted mock prices: {len(prices)}")
@@ -107,33 +144,108 @@ def collect(config: AgentConfig) -> int:
             print(f"Inserted mock orderbooks: {len(orderbooks)}")
             return 0
 
-        exchange = CoinbaseCollector(config.coinbase_base_url)
-        prices = exchange.collect_prices()
+        exchange = FallbackExchangeCollector(
+            [
+                CoinbaseCollector(config.coinbase_base_url),
+                KrakenCollector(config.kraken_base_url),
+            ]
+        )
+        try:
+            prices = exchange.collect_prices()
+        except Exception as exc:
+            store.log_raw_snapshot(
+                now,
+                "public-exchange",
+                None,
+                "collection_status",
+                {},
+                status="failed",
+                error_message=str(exc),
+            )
+            raise HttpError(f"public exchange collection failed: {exc}") from exc
         for snapshot in prices:
             store.log_price(snapshot)
+            store.log_raw_snapshot(
+                now,
+                snapshot.source,
+                snapshot.asset.value,
+                "exchange_price",
+                {"price": snapshot.price, "source": snapshot.source},
+                status="ok",
+            )
+            try:
+                candles = exchange.recent_candles(snapshot.asset, granularity=60)
+            except Exception as exc:
+                store.log_raw_snapshot(
+                    now,
+                    snapshot.source,
+                    snapshot.asset.value,
+                    "exchange_candles",
+                    {},
+                    status="failed",
+                    error_message=str(exc),
+                )
+                raise HttpError(f"public exchange candle collection failed: {exc}") from exc
             store.log_candles(
                 asset=snapshot.asset.value,
-                candles=exchange.recent_candles(snapshot.asset, granularity=60),
+                candles=candles,
                 source=snapshot.source,
                 observed_at=now,
             )
             print(f"{snapshot.asset.value} {snapshot.price:.2f} from {snapshot.source}")
 
         polymarket = PolymarketPublicCollector(config.gamma_base_url, config.clob_base_url)
-        markets = polymarket.discover_updown_markets(config.max_market_duration_minutes)
+        try:
+            markets = polymarket.discover_updown_markets(config.max_market_duration_minutes)
+        except Exception as exc:
+            store.log_raw_snapshot(
+                now,
+                "polymarket-public",
+                None,
+                "collection_status",
+                {},
+                status="failed",
+                error_message=str(exc),
+            )
+            raise
         if not markets:
             print("No active short-duration BTC/ETH UP-DOWN markets discovered from public endpoints.")
             print("Use collect --demo or USE_MOCK_DATA=true for offline demo data.")
+            store.log_raw_snapshot(
+                now,
+                "polymarket-public",
+                None,
+                "market_metadata",
+                {"markets": []},
+                status="ok",
+            )
         else:
-            orderbooks = {
-                token_id: polymarket.orderbook(token_id)
-                for market in markets
-                for token_id in (market.up_token_id, market.down_token_id)
-            }
-            store.replace_collected_market_data(now, markets, orderbooks)
+            orderbooks = {}
+            complete_markets = []
+            for market in markets:
+                try:
+                    up_book = polymarket.orderbook(market.up_token_id)
+                    down_book = polymarket.orderbook(market.down_token_id)
+                except Exception as exc:
+                    store.log_raw_snapshot(
+                        now,
+                        "polymarket-public",
+                        market.asset.value,
+                        "orderbook",
+                        {"market_slug": market.slug},
+                        status="failed",
+                        error_message=str(exc),
+                    )
+                    continue
+                orderbooks[market.up_token_id] = up_book
+                orderbooks[market.down_token_id] = down_book
+                complete_markets.append(market)
+            store.replace_collected_market_data(now, complete_markets, orderbooks)
+            _log_market_raw_snapshots(store, now, "polymarket-public", markets, orderbooks, "ok")
             store.set_state("last_collection_mode", "public", now)
             print(f"Discovered {len(markets)} candidate Polymarket UP/DOWN markets.")
-            for market in markets[:10]:
+            print(f"Stored complete orderbooks for {len(complete_markets)} markets.")
+            for market in complete_markets[:10]:
                 print(f"{market.asset.value} {market.slug} ends {market.window.end.isoformat()}")
     finally:
         store.close()
@@ -198,6 +310,51 @@ def trades(config: AgentConfig) -> int:
     store = SQLiteStore(config.database_path)
     try:
         print(build_trade_ledger(store))
+    finally:
+        store.close()
+    return 0
+
+
+def replay(config: AgentConfig) -> int:
+    now = datetime.now(timezone.utc)
+    store = SQLiteStore(config.database_path)
+    try:
+        engine = PaperTradingEngine(config, store)
+        current_prices, candle_source, markets, orderbook_source, settlement_prices = _load_replay_context(store)
+        if not current_prices or not markets:
+            print("No stored snapshots available for replay. Run collect --demo or collect first.")
+            return 1
+        engine.record_equity(now)
+        if config.strategy == "pair-cost":
+            accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
+        else:
+            accepted, skipped = _run_momentum(
+                engine,
+                markets,
+                orderbook_source,
+                candle_source,
+                current_prices,
+                now,
+            )
+        closed = 0
+        if settlement_prices:
+            settlement_now = max(market.window.end for market in markets)
+            closed = engine.close_expired(settlement_prices, now=settlement_now)
+        store.set_state("last_replay_strategy", config.strategy, now)
+        print(
+            f"Replay complete. Strategy: {config.strategy}; accepted fake trades: {accepted}; "
+            f"skipped: {skipped}; closed: {closed}."
+        )
+    finally:
+        store.close()
+    return 0
+
+
+def backtest_report(config: AgentConfig) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        strategy = store.get_state("last_replay_strategy") or config.strategy
+        print(build_backtest_report(store, config.starting_balance, strategy).as_text())
     finally:
         store.close()
     return 0
@@ -323,6 +480,93 @@ def _load_run_context(
     return current_prices, exchange, markets, polymarket, None
 
 
+def _load_replay_context(store: SQLiteStore):
+    current_prices = store.latest_prices(source_prefix="mock:demo:spot:")
+    if not current_prices:
+        current_prices = store.latest_prices()
+    markets = store.collected_markets()
+    settlement_prices = _stored_settlement_prices(store)
+    return (
+        current_prices,
+        _StoredCandleSource(store, ""),
+        markets,
+        _StoredOrderBookSource(store),
+        settlement_prices,
+    )
+
+
+def _stored_settlement_prices(store: SQLiteStore):
+    rows = store.rows(
+        """
+        SELECT asset, payload_json, observed_at, source_name
+        FROM raw_snapshots
+        WHERE snapshot_type = 'settlement_price' AND status = 'ok'
+        ORDER BY observed_at DESC, id DESC
+        """
+    )
+    import json
+
+    output = {}
+    for row in rows:
+        asset = str(row["asset"])
+        if asset in output:
+            continue
+        payload = json.loads(str(row["payload_json"]))
+        output[asset] = type("_ReplayPrice", (), {
+            "asset": asset,
+            "price": float(payload["price"]),
+            "timestamp": row["observed_at"],
+            "source": row["source_name"],
+        })()
+    return output
+
+
+def _log_market_raw_snapshots(
+    store: SQLiteStore,
+    now: datetime,
+    source_name: str,
+    markets,
+    orderbooks,
+    status: str,
+) -> None:
+    store.log_raw_snapshot(
+        now,
+        source_name,
+        None,
+        "market_metadata",
+        {
+            "markets": [
+                {
+                    "market_id": market.market_id,
+                    "slug": market.slug,
+                    "title": market.title,
+                    "asset": market.asset.value,
+                    "window_start": market.window.start.isoformat(),
+                    "window_end": market.window.end.isoformat(),
+                    "is_mock": market.is_mock,
+                }
+                for market in markets
+            ]
+        },
+        status=status,
+    )
+    for token_id, book in orderbooks.items():
+        store.log_raw_snapshot(
+            now,
+            source_name,
+            None,
+            "orderbook",
+            {
+                "token_id": token_id,
+                "best_bid": book.best_bid,
+                "best_ask": book.best_ask,
+                "spread": book.spread,
+                "last_trade_price": book.last_trade_price,
+            },
+            status=status,
+        )
+
+
 def _signal_for(strategy: MomentumUpDownStrategy, candle_source, asset: Asset) -> Signal:
     candles = candle_source.recent_candles(asset)
     return strategy.signal(asset, candles)
@@ -353,7 +597,8 @@ class _StoredCandleSource:
         self.source_prefix = source_prefix
 
     def recent_candles(self, asset: Asset, granularity: int = 60):
-        return self.store.recent_candles(asset.value, limit=5, source_prefix=self.source_prefix)
+        prefix = self.source_prefix or None
+        return self.store.recent_candles(asset.value, limit=5, source_prefix=prefix)
 
 
 class _StoredOrderBookSource:

@@ -55,3 +55,5 @@ def test_no_live_execution_dependencies_or_wallet_code():
         text = path.read_text(encoding="utf-8").lower()
         for token in forbidden_tokens:
             assert token not in text, f"{token} found in {path}"
+    env_text = Path(".env.example").read_text(encoding="utf-8")
+    assert "PRIVATE_KEY" not in env_text

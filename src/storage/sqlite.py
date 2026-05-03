@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,16 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     total_equity REAL NOT NULL,
     position_exposure REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS raw_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    asset TEXT,
+    snapshot_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT
+);
 """
 
 
@@ -131,6 +142,34 @@ class SQLiteStore:
                 snapshot.asset.value,
                 snapshot.price,
                 snapshot.source,
+            ),
+        )
+        self.conn.commit()
+
+    def log_raw_snapshot(
+        self,
+        observed_at: datetime,
+        source_name: str,
+        asset: str | None,
+        snapshot_type: str,
+        payload: dict[str, Any] | list[Any],
+        status: str = "ok",
+        error_message: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO raw_snapshots
+                (observed_at, source_name, asset, snapshot_type, payload_json, status, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _iso(observed_at),
+                source_name,
+                asset,
+                snapshot_type,
+                json.dumps(payload, sort_keys=True),
+                status,
+                error_message,
             ),
         )
         self.conn.commit()
@@ -476,6 +515,64 @@ class SQLiteStore:
             asks=asks,
             last_trade_price=float(row["last_trade_price"]) if row["last_trade_price"] is not None else None,
         )
+
+    def raw_snapshot_rows(self) -> list[sqlite3.Row]:
+        return self.rows("SELECT * FROM raw_snapshots ORDER BY observed_at, id")
+
+    def data_quality_metrics(self, stale_seconds: int = 900, wide_spread: float = 0.10) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        raw_rows = self.raw_snapshot_rows()
+        failed = sum(1 for row in raw_rows if row["status"] != "ok")
+        stale = 0
+        for row in raw_rows:
+            observed = _from_iso(str(row["observed_at"]))
+            if (now - observed).total_seconds() > stale_seconds:
+                stale += 1
+        latest_prices = self.latest_prices()
+        missing_prices = sum(1 for asset in ("BTC", "ETH") if asset not in latest_prices)
+        markets = self.collected_markets()
+        missing_orderbooks = 0
+        wide_spreads = 0
+        low_liquidity = 0
+        for market in markets:
+            for token_id in (market.up_token_id, market.down_token_id):
+                book = self.collected_orderbook(token_id)
+                if book is None:
+                    missing_orderbooks += 1
+                    continue
+                if book.spread is not None and book.spread > wide_spread:
+                    wide_spreads += 1
+                total_size = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
+                if total_size < 10:
+                    low_liquidity += 1
+        skip_rows = self.rows(
+            """
+            SELECT reason, COUNT(*) AS count
+            FROM opportunities
+            WHERE decision = 'SKIP'
+            GROUP BY reason
+            ORDER BY count DESC, reason
+            """
+        )
+        coverage_rows = self.rows(
+            """
+            SELECT source_name, COUNT(*) AS count
+            FROM raw_snapshots
+            GROUP BY source_name
+            ORDER BY source_name
+            """
+        )
+        return {
+            "snapshots_collected": len(raw_rows),
+            "failed_collection_attempts": failed,
+            "stale_snapshots": stale,
+            "missing_orderbooks": missing_orderbooks,
+            "missing_prices": missing_prices,
+            "wide_spreads": wide_spreads,
+            "low_liquidity_markets": low_liquidity,
+            "skipped_by_reason": {str(row["reason"]): int(row["count"]) for row in skip_rows},
+            "source_coverage": {str(row["source_name"]): int(row["count"]) for row in coverage_rows},
+        }
 
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return list(self.conn.execute(query, params))
