@@ -2,20 +2,36 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from statistics import median
+from datetime import datetime
 from typing import Any
 
+from src.config import AgentConfig
+from src.reports.active_markets import select_market_snapshots, summarize_liquidity, summarize_timing
 from src.reports.config_view import format_config_view, merged_config_view, parse_config_notes
 from src.storage.sqlite import SQLiteStore
 
 
 def build_diagnostics(
     store: SQLiteStore,
+    config: AgentConfig,
     run_id: str | None = None,
     strategy: str | None = None,
     source_filter: str | None = None,
     session_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    active_only: bool = False,
+    min_seconds_to_expiry: int | None = None,
+    max_seconds_to_expiry: int | None = None,
 ) -> str:
-    run_rows = _matching_run_rows(store, run_id=run_id, strategy=strategy, source_filter=source_filter, session_id=session_id)
+    run_rows = _matching_run_rows(
+        store,
+        run_id=run_id,
+        strategy=strategy,
+        source_filter=source_filter,
+        session_id=session_id,
+        active_only=active_only,
+    )
     scope = _scope_label(run_rows, run_id=run_id, strategy=strategy, source_filter=source_filter, session_id=session_id)
     lines = ["Strategy diagnostics", f"Scope: {scope}"]
     if not run_rows:
@@ -27,14 +43,31 @@ def build_diagnostics(
     lines.append(f"Strategies: {', '.join(strategies)}")
     lines.append(f"Config: {format_config_view(merged_config_view([row['notes'] for row in run_rows]))}")
 
-    overall = _aggregate_for_runs(store, run_rows, session_id=session_id)
+    market_selection = select_market_snapshots(
+        store,
+        config,
+        source_filter=source_filter,
+        since=since,
+        until=until,
+        session_id=session_id,
+        active_only=active_only,
+        min_seconds_to_expiry=min_seconds_to_expiry,
+        max_seconds_to_expiry=max_seconds_to_expiry,
+    )
+    overall = _aggregate_for_runs(store, run_rows, session_id=session_id, market_selection=market_selection, config=config)
     lines.extend(_section_lines("Overall", overall))
 
     if len(strategies) > 1:
         lines.append("By strategy:")
         for item in strategies:
             strategy_rows = [row for row in run_rows if str(row["strategy"]) == item]
-            lines.extend(_section_lines(item, _aggregate_for_runs(store, strategy_rows, session_id=session_id), indent="  "))
+            lines.extend(
+                _section_lines(
+                    item,
+                    _aggregate_for_runs(store, strategy_rows, session_id=session_id, market_selection=market_selection, config=config),
+                    indent="  ",
+                )
+            )
 
     lines.append("Market-level diagnostics:")
     market_rows = overall["market_rows"]
@@ -61,7 +94,13 @@ def build_diagnostics(
     return "\n".join(lines)
 
 
-def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any], session_id: str | None = None) -> dict[str, Any]:
+def _aggregate_for_runs(
+    store: SQLiteStore,
+    run_rows: list[Any],
+    session_id: str | None = None,
+    market_selection: list[Any] | None = None,
+    config: AgentConfig | None = None,
+) -> dict[str, Any]:
     run_ids = [str(row["run_id"]) for row in run_rows]
     placeholders = ",".join("?" for _ in run_ids)
     opportunity_rows = store.rows(
@@ -103,6 +142,17 @@ def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any], session_id: str
     run_configs = {str(row["run_id"]): parse_config_notes(row["notes"]) for row in run_rows}
     near_threshold = sum(1 for row in opportunity_rows if _is_near_threshold(row, run_configs.get(str(row["run_id"]), {})))
     market_rows = _market_level_rows(opportunity_rows, trade_rows, market_map)
+    liquidity = summarize_liquidity(market_selection or [], config) if config is not None else {}
+    timing = summarize_timing(market_selection or [])
+    timing["edge_below_threshold"] = sum(
+        1 for row in opportunity_rows if str(row["strategy"]) == "momentum" and str(row["reason"]) == "edge below threshold"
+    )
+    timing["missing_reference_price"] = sum(
+        1 for row in opportunity_rows if str(row["strategy"]) == "momentum" and str(row["reason"]) == "missing underlying price"
+    )
+    timing["missing_current_price"] = sum(
+        1 for row in opportunity_rows if str(row["strategy"]) == "momentum" and str(row["reason"]) in {"missing market price", "public orderbook unavailable"}
+    )
     return {
         "config": format_config_view(merged_config_view([row["notes"] for row in run_rows])),
         "total_opportunities": len(opportunity_rows),
@@ -123,6 +173,8 @@ def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any], session_id: str
         "min_seconds_to_expiry": min(seconds_to_expiry_values, default=None),
         "max_seconds_to_expiry": max(seconds_to_expiry_values, default=None),
         "timing_buckets": dict(timing_buckets),
+        "liquidity": liquidity,
+        "momentum_timing": timing,
         "near_threshold": near_threshold,
         "markets_with_most_skips": markets_with_skips.most_common(5),
         "edge_distribution": _bucket_edges(edge_values),
@@ -155,6 +207,10 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
         f"max:{_fmt_float(values['max_seconds_to_expiry'])}"
     )
     lines.append(f"{indent}timing_buckets={_fmt_map(values['timing_buckets'])}")
+    if values["liquidity"]:
+        lines.append(f"{indent}liquidity={_fmt_map(values['liquidity'])}")
+    if values["momentum_timing"]:
+        lines.append(f"{indent}momentum_timing={_fmt_map(values['momentum_timing'])}")
     lines.append(f"{indent}near_threshold={values['near_threshold']}")
     lines.append(f"{indent}markets_with_most_skips={_fmt_pairs(values['markets_with_most_skips'])}")
     lines.append(f"{indent}edge_distribution={_fmt_map(values['edge_distribution'])}")
@@ -169,6 +225,7 @@ def _matching_run_rows(
     strategy: str | None = None,
     source_filter: str | None = None,
     session_id: str | None = None,
+    active_only: bool = False,
 ) -> list[Any]:
     if run_id:
         row = store.run_by_id(run_id)
@@ -184,6 +241,9 @@ def _matching_run_rows(
     if session_id:
         clauses.append("session_id = ?")
         params.append(session_id)
+    if active_only:
+        clauses.append("notes LIKE ?")
+        params.append("%active_only=true%")
     if clauses:
         where = " WHERE " + " AND ".join(clauses)
         return store.rows(f"SELECT * FROM runs{where} ORDER BY started_at, rowid", tuple(params))

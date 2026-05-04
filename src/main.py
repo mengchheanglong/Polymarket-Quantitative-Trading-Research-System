@@ -13,8 +13,9 @@ from src.collectors.mock_markets import MockMarketSource
 from src.collectors.polymarket import PolymarketPublicCollector, _candidate_to_market
 from src.config import AgentConfig, load_config
 from src.http_client import HttpError
-from src.models import Asset, Direction, OpportunityDecision, OrderBook, Signal
+from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook, Signal
 from src.reports.backtest import build_backtest_report
+from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
 from src.reports.dataset import build_dataset_summary
 from src.reports.diagnostics import build_diagnostics
@@ -75,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     replay_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
     replay_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    replay_parser.add_argument("--active-only", action="store_true", help="Replay only markets inside a valid active trading window with stored orderbooks.")
+    replay_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
+    replay_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument(
         "--close-mode",
         choices=("none", "mark-to-market", "expiry-if-known", "approximate-expiry"),
@@ -93,21 +97,29 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
     backtest_parser.add_argument("--until", help="Only summarize snapshots at or before this UTC ISO timestamp.")
     backtest_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    backtest_parser.add_argument("--active-only", action="store_true", help="Summarize active-only replay runs for the selected scope.")
     subcommands.add_parser("runs", help="List experiment runs")
     compare_parser = subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
     compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     compare_parser.add_argument("--session-id", help="Filter runs for a research session.")
+    compare_parser.add_argument("--active-only", action="store_true", help="Compare only runs created with --active-only.")
     diagnostics_parser = subcommands.add_parser("diagnostics", help="Explain accepted/skipped paper opportunities")
     diagnostics_parser.add_argument("--run-id", help="Inspect a specific run.")
     diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Filter by strategy.")
     diagnostics_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     diagnostics_parser.add_argument("--session-id", help="Filter runs for a research session.")
+    diagnostics_parser.add_argument("--active-only", action="store_true", help="Filter to runs created with --active-only and show active-market liquidity diagnostics.")
+    diagnostics_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
+    diagnostics_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     sweep_parser = subcommands.add_parser("sweep", help="Run a paper-only threshold sweep on stored snapshots")
     sweep_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), required=True)
     sweep_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     sweep_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     sweep_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
     sweep_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    sweep_parser.add_argument("--active-only", action="store_true", help="Sweep only markets inside a valid active trading window.")
+    sweep_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
+    sweep_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
     reset_parser.add_argument("--paper-results", action="store_true", help="Delete paper runs, trades, opportunities, and equity only.")
     reset_parser.add_argument("--all", action="store_true", help="Delete paper results and collected snapshot data.")
@@ -137,6 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     markets_parser.add_argument("--since", help="Only inspect markets collected at or after this UTC ISO timestamp.")
     markets_parser.add_argument("--until", help="Only inspect markets collected at or before this UTC ISO timestamp.")
     markets_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    active_markets_parser = subcommands.add_parser("active-markets", help="Summarize active market windows and liquidity")
+    active_markets_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    active_markets_parser.add_argument("--since", help="Only inspect markets collected at or after this UTC ISO timestamp.")
+    active_markets_parser.add_argument("--until", help="Only inspect markets collected at or before this UTC ISO timestamp.")
+    active_markets_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    active_markets_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
+    active_markets_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     discover_parser = subcommands.add_parser("discover-markets", help="Probe public Polymarket market discovery")
     discover_parser.add_argument("--asset", choices=("BTC", "ETH", "all"), default="all")
     export_parser = subcommands.add_parser("export", help="Export local research data")
@@ -196,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
             return readiness(config, args)
         if args.command == "markets":
             return market_audit(config, args)
+        if args.command == "active-markets":
+            return active_markets(config, args)
         if args.command == "discover-markets":
             return discover_markets(config, args)
         if args.command == "export":
@@ -569,7 +590,7 @@ def research_report(config: AgentConfig, args) -> int:
             ).as_text()
         )
         print(build_strategy_comparison(store, source_filter="public", session_id=session_id))
-        print(build_diagnostics(store, strategy=None, source_filter="public", session_id=session_id))
+        print(build_diagnostics(store, config, strategy=None, source_filter="public", session_id=session_id, since=since, until=until))
     finally:
         store.close()
     return 0
@@ -671,6 +692,9 @@ def replay(config: AgentConfig, args) -> int:
             since=since,
             until=until,
             session_id=session_id,
+            active_only=bool(getattr(args, "active_only", False)),
+            min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
+            max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
             now=now,
             data_store=store,
             result_store=store,
@@ -708,6 +732,7 @@ def backtest_report(config: AgentConfig, args) -> int:
                 since=since,
                 until=until,
                 session_id=session_id,
+                active_only=bool(getattr(args, "active_only", False)),
             ).as_text()
         )
     finally:
@@ -752,6 +777,7 @@ def compare(config: AgentConfig, args) -> int:
                 store,
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
                 session_id=getattr(args, "session_id", None),
+                active_only=bool(getattr(args, "active_only", False)),
             )
         )
     finally:
@@ -762,13 +788,20 @@ def compare(config: AgentConfig, args) -> int:
 def diagnostics(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(store, args)
         print(
             build_diagnostics(
                 store,
+                config,
                 run_id=getattr(args, "run_id", None),
                 strategy=getattr(args, "strategy", None),
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
-                session_id=getattr(args, "session_id", None),
+                session_id=session_id,
+                since=since,
+                until=until,
+                active_only=bool(getattr(args, "active_only", False)),
+                min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
+                max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
             )
         )
     finally:
@@ -793,6 +826,9 @@ def sweep(config: AgentConfig, args) -> int:
                         since=since,
                         until=until,
                         session_id=session_id,
+                        active_only=bool(getattr(args, "active_only", False)),
+                        min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
+                        max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
                         now=datetime.now(timezone.utc),
                         data_store=data_store,
                         result_store=scratch,
@@ -957,6 +993,27 @@ def market_audit(config: AgentConfig, args) -> int:
                     ]
                 )
             )
+    finally:
+        store.close()
+    return 0
+
+
+def active_markets(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        session_id, since, until = _resolved_time_filters(store, args)
+        print(
+            build_active_market_report(
+                store,
+                config,
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+                since=since,
+                until=until,
+                session_id=session_id,
+                min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
+                max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
+            )
+        )
     finally:
         store.close()
     return 0
@@ -1417,6 +1474,9 @@ def _simulate_replay(
     since: datetime | None,
     until: datetime | None,
     session_id: str | None,
+    active_only: bool,
+    min_seconds_to_expiry: int | None,
+    max_seconds_to_expiry: int | None,
     now: datetime,
     data_store: SQLiteStore,
     result_store: SQLiteStore,
@@ -1429,6 +1489,10 @@ def _simulate_replay(
         since=since,
         until=until,
         session_id=session_id,
+        config=config,
+        active_only=active_only,
+        min_seconds_to_expiry=min_seconds_to_expiry,
+        max_seconds_to_expiry=max_seconds_to_expiry,
     )
     if not current_prices:
         return {
@@ -1483,7 +1547,11 @@ def _simulate_replay(
         now=now,
         notes=(
             f"{_config_notes(config)}; source_filter={source_filter or 'all'}; "
-            f"since={since_label or 'none'}; until={until.isoformat() if until else 'none'}; close_mode={config.close_mode}"
+            f"since={since_label or 'none'}; until={until.isoformat() if until else 'none'}; "
+            f"active_only={'true' if active_only else 'false'}; "
+            f"min_seconds_to_expiry_filter={min_seconds_to_expiry if min_seconds_to_expiry is not None else 'none'}; "
+            f"max_seconds_to_expiry_filter={max_seconds_to_expiry if max_seconds_to_expiry is not None else 'none'}; "
+            f"close_mode={config.close_mode}"
         ),
         session_id=session_id,
     )
@@ -1605,10 +1673,14 @@ def _load_run_context(
 
 def _load_replay_context(
     store: SQLiteStore,
+    config: AgentConfig,
     source_filter: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
     session_id: str | None = None,
+    active_only: bool = False,
+    min_seconds_to_expiry: int | None = None,
+    max_seconds_to_expiry: int | None = None,
 ):
     if source_filter == "demo":
         current_prices = store.latest_prices(source_prefix="mock:demo:spot:", source_filter="demo", since=since, until=until, session_id=session_id)
@@ -1619,7 +1691,33 @@ def _load_replay_context(
     else:
         current_prices = store.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
         candle_prefix = None
-    markets = store.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
+    selected = select_market_snapshots(
+        store,
+        config,
+        source_filter=source_filter,
+        since=since,
+        until=until,
+        session_id=session_id,
+        active_only=active_only,
+        min_seconds_to_expiry=min_seconds_to_expiry,
+        max_seconds_to_expiry=max_seconds_to_expiry,
+    )
+    markets = [
+        Market(
+            market_id=item.market.market_id,
+            slug=item.market.slug,
+            title=item.market.title,
+            asset=item.market.asset,
+            window=item.market.window,
+            up_token_id=item.market.up_token_id,
+            down_token_id=item.market.down_token_id,
+            source_url=item.market.source_url,
+            is_mock=item.market.is_mock,
+            observed_at=item.observed_at,
+            latest_observed_at=item.market.latest_observed_at,
+        )
+        for item in selected
+    ]
     settlement_prices = _stored_settlement_prices(store, source_filter=source_filter, since=since, until=until, session_id=session_id)
     actual_sources = [str(row["source_name"]) for row in store.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)]
     return (

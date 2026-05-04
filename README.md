@@ -136,6 +136,24 @@ python -m src.main replay --strategy momentum --source public --session-id <sess
 
 `mark-to-market` uses the latest stored midpoint before expiry or session end. `approximate-expiry` uses stored exchange prices near market start and expiry to infer a research-only settlement. It may be wrong and is not proof of live profitability. Unresolved or settlement-unavailable positions are not counted as fake profits.
 
+Phase 11 adds active-market filtering and liquidity diagnostics so replay can focus on tradeable windows instead of treating not-started markets as failed opportunities:
+
+```powershell
+python -m src.main active-markets --source public --session-id <session_id>
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only
+python -m src.main replay --strategy pair-cost --source public --session-id <session_id> --active-only
+python -m src.main diagnostics --source public --session-id <session_id> --active-only
+python -m src.main sweep --strategy momentum --source public --session-id <session_id> --active-only
+```
+
+Optional timing filters narrow replay to a seconds-to-expiry band:
+
+```powershell
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --min-seconds-to-expiry 30 --max-seconds-to-expiry 240
+```
+
+`active-markets` reports active BTC/ETH counts, 5m vs 15m mix, lifecycle counts, complete YES/NO orderbook counts, missing asks/bids, wide spreads, low liquidity, pair cost, and fee/slippage-adjusted pair cost. Missing asks matter: a pair-cost setup without both asks is not executable even in paper research.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

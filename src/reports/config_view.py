@@ -17,6 +17,9 @@ _CONFIG_LABELS = (
     ("since", "since"),
     ("until", "until"),
     ("close_mode", "close_mode"),
+    ("active_only", "active_only"),
+    ("min_seconds_to_expiry_filter", "min_seconds_to_expiry_filter"),
+    ("max_seconds_to_expiry_filter", "max_seconds_to_expiry_filter"),
 )
 
 

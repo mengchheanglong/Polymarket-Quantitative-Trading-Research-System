@@ -7,6 +7,7 @@ def build_strategy_comparison(
     store: SQLiteStore,
     source_filter: str | None = None,
     session_id: str | None = None,
+    active_only: bool = False,
 ) -> str:
     clauses = []
     params: list[str] = []
@@ -16,6 +17,9 @@ def build_strategy_comparison(
     if session_id:
         clauses.append("r.session_id = ?")
         params.append(session_id)
+    if active_only:
+        clauses.append("r.notes LIKE ?")
+        params.append("%active_only=true%")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = store.rows(
         f"""
@@ -34,13 +38,13 @@ def build_strategy_comparison(
         """,
         tuple(params),
     )
-    lines = ["Strategy comparison", f"Source filter: {source_filter or 'all'}", f"Session ID: {session_id or 'none'}"]
+    lines = ["Strategy comparison", f"Source filter: {source_filter or 'all'}", f"Session ID: {session_id or 'none'}", f"Active only: {active_only}"]
     if not rows:
         lines.append("No runs found.")
         return "\n".join(lines)
 
     lines.append("Latest runs:")
-    latest_rows = _latest_rows_by_strategy(store, source_filter, session_id)
+    latest_rows = _latest_rows_by_strategy(store, source_filter, session_id, active_only)
     for row in latest_rows:
         lines.append(
             " | ".join(
@@ -66,6 +70,9 @@ def build_strategy_comparison(
         if session_id:
             filter_clauses.append("r.session_id = ?")
             filter_params.append(session_id)
+        if active_only:
+            filter_clauses.append("r.notes LIKE ?")
+            filter_params.append("%active_only=true%")
         filter_where = " AND ".join(filter_clauses)
         win_row = store.rows(
             f"""
@@ -109,8 +116,8 @@ def build_strategy_comparison(
     return "\n".join(lines)
 
 
-def _latest_rows_by_strategy(store: SQLiteStore, source_filter: str | None, session_id: str | None) -> list:
-    if source_filter or session_id:
+def _latest_rows_by_strategy(store: SQLiteStore, source_filter: str | None, session_id: str | None, active_only: bool) -> list:
+    if source_filter or session_id or active_only:
         clauses = []
         params: list[str] = []
         if source_filter:
@@ -119,6 +126,9 @@ def _latest_rows_by_strategy(store: SQLiteStore, source_filter: str | None, sess
         if session_id:
             clauses.append("session_id = ?")
             params.append(session_id)
+        if active_only:
+            clauses.append("notes LIKE ?")
+            params.append("%active_only=true%")
         where = " AND ".join(clauses)
         return store.rows(
             f"""

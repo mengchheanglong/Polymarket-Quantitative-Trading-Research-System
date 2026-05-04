@@ -87,6 +87,7 @@ python -m src.main readiness --source public
 python -m src.main discover-markets --asset BTC
 python -m src.main discover-markets --asset ETH
 python -m src.main markets --source public
+python -m src.main active-markets --source public
 python -m src.main diagnostics --source public
 python -m src.main sweep --strategy momentum --source public
 ```
@@ -131,6 +132,9 @@ python -m src.main replay --strategy pair-cost --source public
 python -m src.main replay --strategy momentum --source public --session-id <session_id>
 python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode mark-to-market
 python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode approximate-expiry
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only
+python -m src.main replay --strategy pair-cost --source public --session-id <session_id> --active-only
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --min-seconds-to-expiry 30 --max-seconds-to-expiry 240
 ```
 
 Summarize replay/backtest and data quality:
@@ -233,3 +237,4 @@ Public discovery process:
 - Public CLOB orderbook capture through public market-data endpoints only.
 - Diagnostics and sweeps use stored snapshots only. They never call external APIs.
 - `mark-to-market` and `approximate-expiry` close modes are paper-only research tools. They do not use authenticated APIs and do not imply real settlement certainty.
+- `--active-only` limits replay and sweeps to valid active market windows with stored orderbooks, so not-started or expired markets are separated from true strategy failures.

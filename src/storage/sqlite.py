@@ -224,6 +224,30 @@ CREATE TABLE IF NOT EXISTS research_sessions (
     failed_snapshot_count INTEGER DEFAULT 0,
     notes TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_asset_session_observed
+    ON price_snapshots (asset, session_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_source_observed
+    ON price_snapshots (source, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candles_asset_session_candle
+    ON candles (asset, session_id, candle_start DESC);
+CREATE INDEX IF NOT EXISTS idx_candles_source_observed
+    ON candles (source, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_history_session_observed_slug
+    ON collected_market_history (session_id, observed_at, market_slug);
+CREATE INDEX IF NOT EXISTS idx_market_history_source_observed_slug
+    ON collected_market_history (source_name, observed_at, market_slug);
+CREATE INDEX IF NOT EXISTS idx_orderbook_history_token_session_observed
+    ON collected_orderbook_history (token_id, session_id, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orderbook_history_source_observed
+    ON collected_orderbook_history (source_name, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_snapshots_session_observed
+    ON raw_snapshots (session_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_raw_snapshots_source_type_observed
+    ON raw_snapshots (source_name, snapshot_type, observed_at);
+CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_observed
+    ON discovered_markets (session_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_discovered_markets_source_observed
+    ON discovered_markets (source_name, observed_at);
 """
 
 
@@ -854,13 +878,39 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> PriceSnapshot | None:
-        prices = self.latest_prices(
-            source_filter=source_filter,
-            since=since,
-            until=until,
-            session_id=session_id,
+        clauses = ["asset = ?"]
+        params: list[Any] = [asset]
+        source_clause, source_params = _source_sql("source", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
+        row = self.conn.execute(
+            f"""
+            SELECT asset, price, observed_at, source
+            FROM price_snapshots
+            WHERE {' AND '.join(clauses)}
+            ORDER BY observed_at DESC, id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if row is None:
+            return None
+        return PriceSnapshot(
+            asset=asset_enum(str(row["asset"])),
+            price=float(row["price"]),
+            timestamp=_from_iso(str(row["observed_at"])),
+            source=str(row["source"]),
         )
-        return prices.get(asset)
 
     def nearest_price(
         self,

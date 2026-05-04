@@ -30,6 +30,7 @@ Phase 1 is paper-only by design.
 - Threshold sweeps are temporary paper-only research runs against stored snapshots. They do not modify the default config and do not prove live profitability.
 - Session-scoped replay, diagnostics, sweeps, backtest reports, and exports stay inside the selected research session or explicit time window.
 - Replay close modes such as `mark-to-market`, `expiry-if-known`, and `approximate-expiry` are paper-only accounting choices. They do not place orders and do not turn stored public data into a real settlement feed.
+- `--active-only` is a research filter only. It changes which stored market windows are evaluated; it does not loosen thresholds and does not create any execution path.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
 - `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.
@@ -49,5 +50,7 @@ Report metrics are paper metrics only:
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
 
 Skip-heavy results are not a failure by themselves. A paper-only engine that rejects negative-edge or wide-spread public opportunities is behaving more safely than one that forces simulated fills to manufacture activity.
+
+Not-started markets are not failed trade ideas. They are inventory observed before the valid entry window opened. Phase 11 separates those from active market windows so liquidity and strategy quality can be evaluated more honestly.
 
 Source filters are safety and research-integrity controls. Use `--source public` when evaluating observed public data and `--source demo` when validating deterministic offline behavior. Mixed datasets are allowed in one SQLite file, but readiness and reports make the mix explicit so mock data is not mistaken for public market evidence.

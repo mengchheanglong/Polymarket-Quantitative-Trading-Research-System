@@ -13,6 +13,7 @@ class BacktestReport:
     strategy: str
     mode: str
     source_filter: str
+    active_only: bool
     config_summary: str
     actual_sources: dict[str, int]
     demo_included: bool
@@ -46,6 +47,7 @@ class BacktestReport:
                 f"Strategy: {self.strategy}",
                 f"Mode: {self.mode}",
                 f"Source filter: {self.source_filter}",
+                f"Active only: {self.active_only}",
                 f"Config: {self.config_summary}",
                 f"Actual data sources: {_format_map(self.actual_sources)}",
                 f"Includes demo data: {self.demo_included}",
@@ -92,8 +94,9 @@ def build_backtest_report(
     since: datetime | None = None,
     until: datetime | None = None,
     session_id: str | None = None,
+    active_only: bool = False,
 ) -> BacktestReport:
-    run_id = _latest_run_id_for_source(store, source_filter, session_id)
+    run_id = _latest_run_id_for_source(store, source_filter, session_id, active_only)
     if run_id:
         report = build_report(store, starting_balance, run_id=run_id)
     elif source_filter:
@@ -134,6 +137,7 @@ def build_backtest_report(
         strategy=strategy,
         mode=str(run["mode"]) if run else "n/a",
         source_filter=source_filter or "all",
+        active_only=active_only,
         config_summary=report.config_summary,
         actual_sources=quality["source_coverage"],
         demo_included=dataset["demo_included"],
@@ -161,8 +165,8 @@ def build_backtest_report(
     )
 
 
-def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None, session_id: str | None) -> str | None:
-    if not source_filter and not session_id:
+def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None, session_id: str | None, active_only: bool) -> str | None:
+    if not source_filter and not session_id and not active_only:
         return store.latest_run_id()
     clauses = []
     params: list[str] = []
@@ -172,6 +176,9 @@ def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None, ses
     if session_id:
         clauses.append("session_id = ?")
         params.append(session_id)
+    if active_only:
+        clauses.append("notes LIKE ?")
+        params.append("%active_only=true%")
     row = store.rows(
         f"""
         SELECT run_id
