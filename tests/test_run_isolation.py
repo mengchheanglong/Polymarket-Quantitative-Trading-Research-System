@@ -40,6 +40,7 @@ def test_report_latest_and_by_run_id_are_isolated(tmp_path, capsys):
 
     assert main(["--db", str(db_path), "report", "--latest"]) == 0
     latest_stdout = capsys.readouterr().out
+    assert "Config:" in latest_stdout
     assert "Closed trades: 4" in latest_stdout
     assert "Skipped trades: 1" in latest_stdout
 

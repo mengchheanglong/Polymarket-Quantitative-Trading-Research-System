@@ -13,6 +13,7 @@ class BacktestReport:
     strategy: str
     mode: str
     source_filter: str
+    config_summary: str
     actual_sources: dict[str, int]
     demo_included: bool
     public_included: bool
@@ -40,6 +41,7 @@ class BacktestReport:
                 f"Strategy: {self.strategy}",
                 f"Mode: {self.mode}",
                 f"Source filter: {self.source_filter}",
+                f"Config: {self.config_summary}",
                 f"Actual data sources: {_format_map(self.actual_sources)}",
                 f"Includes demo data: {self.demo_included}",
                 f"Includes public data: {self.public_included}",
@@ -116,6 +118,7 @@ def build_backtest_report(
         strategy=strategy,
         mode=str(run["mode"]) if run else "n/a",
         source_filter=source_filter or "all",
+        config_summary=report.config_summary,
         actual_sources=quality["source_coverage"],
         demo_included=dataset["demo_included"],
         public_included=dataset["public_included"],
@@ -156,6 +159,10 @@ def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None) -> 
 def _empty_report(source_filter: str, starting_balance: float) -> Report:
     return Report(
         scope=f"source={source_filter}; no matching run",
+        strategy="n/a",
+        mode="n/a",
+        data_source="n/a",
+        config_summary="n/a",
         starting_balance=starting_balance,
         current_balance=starting_balance,
         realized_pnl=0.0,

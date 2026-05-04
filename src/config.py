@@ -22,6 +22,7 @@ class AgentConfig:
     max_position_pct: float = 0.05
     max_position_usd: float = 100.0
     min_edge: float = 0.02
+    max_spread: float = 0.10
     fee_bps: float = 10.0
     slippage_bps: float = 25.0
     assumed_spread: float = 0.02
@@ -64,6 +65,7 @@ def load_config() -> AgentConfig:
         max_position_pct=float(os.environ.get("MAX_POSITION_PCT", "0.05")),
         max_position_usd=float(os.environ.get("MAX_POSITION_USD", "100")),
         min_edge=float(os.environ.get("MIN_EDGE", "0.02")),
+        max_spread=float(os.environ.get("MAX_SPREAD", "0.10")),
         fee_bps=float(os.environ.get("FEE_BPS", "10")),
         slippage_bps=float(os.environ.get("SLIPPAGE_BPS", "25")),
         assumed_spread=float(os.environ.get("ASSUMED_SPREAD", "0.02")),

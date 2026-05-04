@@ -68,6 +68,7 @@ def test_backtest_report_summary_fields(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "Backtest/replay report" in stdout
     assert "Strategy: momentum" in stdout
+    assert "Config:" in stdout
     assert "Snapshots collected:" in stdout
     assert "Markets seen:" in stdout
     assert "Opportunities:" in stdout

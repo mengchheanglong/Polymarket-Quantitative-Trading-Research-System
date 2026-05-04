@@ -1,0 +1,304 @@
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from statistics import median
+from typing import Any
+
+from src.reports.config_view import format_config_view, merged_config_view, parse_config_notes
+from src.storage.sqlite import SQLiteStore
+
+
+def build_diagnostics(
+    store: SQLiteStore,
+    run_id: str | None = None,
+    strategy: str | None = None,
+    source_filter: str | None = None,
+) -> str:
+    run_rows = _matching_run_rows(store, run_id=run_id, strategy=strategy, source_filter=source_filter)
+    scope = _scope_label(run_rows, run_id=run_id, strategy=strategy, source_filter=source_filter)
+    lines = ["Strategy diagnostics", f"Scope: {scope}"]
+    if not run_rows:
+        lines.append("No matching runs found.")
+        return "\n".join(lines)
+
+    lines.append(f"Runs matched: {len(run_rows)}")
+    strategies = sorted({str(row['strategy']) for row in run_rows})
+    lines.append(f"Strategies: {', '.join(strategies)}")
+    lines.append(f"Config: {format_config_view(merged_config_view([row['notes'] for row in run_rows]))}")
+
+    overall = _aggregate_for_runs(store, run_rows)
+    lines.extend(_section_lines("Overall", overall))
+
+    if len(strategies) > 1:
+        lines.append("By strategy:")
+        for item in strategies:
+            strategy_rows = [row for row in run_rows if str(row["strategy"]) == item]
+            lines.extend(_section_lines(item, _aggregate_for_runs(store, strategy_rows), indent="  "))
+
+    lines.append("Market-level diagnostics:")
+    market_rows = overall["market_rows"]
+    if not market_rows:
+        lines.append("none")
+    else:
+        for row in market_rows[:10]:
+            lines.append(
+                " | ".join(
+                    [
+                        str(row["market_slug"]),
+                        f"asset={row['asset']}",
+                        f"opportunities={row['opportunities']}",
+                        f"accepted_trades={row['accepted_trades']}",
+                        f"skipped={row['skipped']}",
+                        f"avg_spread={_fmt_float(row['avg_spread'])}",
+                        f"avg_edge={_fmt_float(row['avg_edge'])}",
+                        f"orderbook={row['orderbook_status']}",
+                        f"first_seen={row['first_seen']}",
+                        f"latest_seen={row['latest_seen']}",
+                    ]
+                )
+            )
+    return "\n".join(lines)
+
+
+def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any]) -> dict[str, Any]:
+    run_ids = [str(row["run_id"]) for row in run_rows]
+    placeholders = ",".join("?" for _ in run_ids)
+    opportunity_rows = store.rows(
+        f"""
+        SELECT o.*, r.strategy, r.data_source, r.notes
+        FROM opportunities o
+        JOIN runs r ON r.run_id = o.run_id
+        WHERE o.run_id IN ({placeholders})
+        ORDER BY o.observed_at, o.id
+        """,
+        tuple(run_ids),
+    )
+    trade_rows = store.rows(
+        f"""
+        SELECT t.*, r.strategy, r.data_source
+        FROM trades t
+        JOIN runs r ON r.run_id = t.run_id
+        WHERE t.run_id IN ({placeholders})
+        ORDER BY t.opened_at, t.trade_id
+        """,
+        tuple(run_ids),
+    )
+    market_map = {
+        row["slug"]: row
+        for row in store.market_audit_rows(source_filter=_single_value(run_rows, "data_source"))
+    }
+    skip_rows = [row for row in opportunity_rows if str(row["decision"]) == "SKIP"]
+    edge_values = [float(row["edge"] or 0.0) for row in opportunity_rows]
+    spread_values = [float(row["spread"]) for row in opportunity_rows if row["spread"] is not None]
+    pair_cost_values = [
+        float(row["market_price"])
+        for row in opportunity_rows
+        if str(row["strategy"]) == "pair-cost" and row["market_price"] is not None
+    ]
+    skipped_by_reason = Counter(str(row["reason"]) for row in skip_rows)
+    markets_with_skips = Counter(str(row["market_slug"]) for row in skip_rows)
+    run_configs = {str(row["run_id"]): parse_config_notes(row["notes"]) for row in run_rows}
+    near_threshold = sum(1 for row in opportunity_rows if _is_near_threshold(row, run_configs.get(str(row["run_id"]), {})))
+    market_rows = _market_level_rows(opportunity_rows, trade_rows, market_map)
+    return {
+        "config": format_config_view(merged_config_view([row["notes"] for row in run_rows])),
+        "total_opportunities": len(opportunity_rows),
+        "accepted_trades": len(trade_rows),
+        "skipped_opportunities": len(skip_rows),
+        "skipped_by_reason": dict(skipped_by_reason),
+        "average_edge": _safe_avg(edge_values),
+        "min_edge": min(edge_values, default=None),
+        "max_edge": max(edge_values, default=None),
+        "median_edge": median(edge_values) if edge_values else None,
+        "average_spread": _safe_avg(spread_values),
+        "min_spread": min(spread_values, default=None),
+        "max_spread": max(spread_values, default=None),
+        "average_pair_cost": _safe_avg(pair_cost_values),
+        "min_pair_cost": min(pair_cost_values, default=None),
+        "max_pair_cost": max(pair_cost_values, default=None),
+        "near_threshold": near_threshold,
+        "markets_with_most_skips": markets_with_skips.most_common(5),
+        "edge_distribution": _bucket_edges(edge_values),
+        "pair_cost_distribution": _bucket_pair_costs(pair_cost_values),
+        "market_rows": market_rows,
+    }
+
+
+def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list[str]:
+    lines = [f"{indent}{label}:"]
+    lines.append(f"{indent}config={values['config']}")
+    lines.append(f"{indent}total_opportunities={values['total_opportunities']}")
+    lines.append(f"{indent}accepted_trades={values['accepted_trades']}")
+    lines.append(f"{indent}skipped_opportunities={values['skipped_opportunities']}")
+    lines.append(f"{indent}skipped_by_reason={_fmt_map(values['skipped_by_reason'])}")
+    lines.append(
+        f"{indent}edge_stats=avg:{_fmt_float(values['average_edge'])}, min:{_fmt_float(values['min_edge'])}, "
+        f"median:{_fmt_float(values['median_edge'])}, max:{_fmt_float(values['max_edge'])}"
+    )
+    lines.append(
+        f"{indent}spread_stats=avg:{_fmt_float(values['average_spread'])}, min:{_fmt_float(values['min_spread'])}, "
+        f"max:{_fmt_float(values['max_spread'])}"
+    )
+    lines.append(
+        f"{indent}pair_cost_stats=avg:{_fmt_float(values['average_pair_cost'])}, min:{_fmt_float(values['min_pair_cost'])}, "
+        f"max:{_fmt_float(values['max_pair_cost'])}"
+    )
+    lines.append(f"{indent}near_threshold={values['near_threshold']}")
+    lines.append(f"{indent}markets_with_most_skips={_fmt_pairs(values['markets_with_most_skips'])}")
+    lines.append(f"{indent}edge_distribution={_fmt_map(values['edge_distribution'])}")
+    if values["pair_cost_distribution"]:
+        lines.append(f"{indent}pair_cost_distribution={_fmt_map(values['pair_cost_distribution'])}")
+    return lines
+
+
+def _matching_run_rows(
+    store: SQLiteStore,
+    run_id: str | None = None,
+    strategy: str | None = None,
+    source_filter: str | None = None,
+) -> list[Any]:
+    if run_id:
+        row = store.run_by_id(run_id)
+        return [row] if row else []
+    clauses = []
+    params: list[Any] = []
+    if strategy:
+        clauses.append("strategy = ?")
+        params.append(strategy)
+    if source_filter:
+        clauses.append("data_source = ?")
+        params.append(source_filter)
+    if clauses:
+        where = " WHERE " + " AND ".join(clauses)
+        return store.rows(f"SELECT * FROM runs{where} ORDER BY started_at, rowid", tuple(params))
+    latest = store.latest_run()
+    return [latest] if latest else []
+
+
+def _scope_label(run_rows: list[Any], run_id: str | None, strategy: str | None, source_filter: str | None) -> str:
+    if run_id:
+        return f"run_id={run_id}"
+    parts = []
+    if strategy:
+        parts.append(f"strategy={strategy}")
+    if source_filter:
+        parts.append(f"source={source_filter}")
+    if parts:
+        return "; ".join(parts)
+    if run_rows:
+        return f"latest run ({run_rows[-1]['run_id']})"
+    return "no matching runs"
+
+
+def _is_near_threshold(row: Any, config: dict[str, str]) -> bool:
+    edge = float(row["edge"] or 0.0)
+    if str(row["strategy"]) == "pair-cost":
+        return abs(edge) <= 0.01
+    threshold = float(config.get("min_edge", "0.02"))
+    return abs(edge - threshold) <= 0.01
+
+
+def _market_level_rows(opportunity_rows: list[Any], trade_rows: list[Any], market_map: dict[str, Any]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "asset": "n/a",
+            "opportunities": 0,
+            "accepted_trades": 0,
+            "skipped": 0,
+            "spreads": [],
+            "edges": [],
+        }
+    )
+    for row in opportunity_rows:
+        market = grouped[str(row["market_slug"])]
+        market["asset"] = str(row["asset"])
+        market["opportunities"] += 1
+        if str(row["decision"]) == "SKIP":
+            market["skipped"] += 1
+        if row["spread"] is not None:
+            market["spreads"].append(float(row["spread"]))
+        market["edges"].append(float(row["edge"] or 0.0))
+    for row in trade_rows:
+        grouped[str(row["market_slug"])]["accepted_trades"] += 1
+
+    output = []
+    for slug, values in grouped.items():
+        audit = market_map.get(slug, {})
+        output.append(
+            {
+                "market_slug": slug,
+                "asset": values["asset"],
+                "opportunities": values["opportunities"],
+                "accepted_trades": values["accepted_trades"],
+                "skipped": values["skipped"],
+                "avg_spread": _safe_avg(values["spreads"]),
+                "avg_edge": _safe_avg(values["edges"]),
+                "orderbook_status": audit.get("orderbook_status", "unknown"),
+                "first_seen": audit.get("first_seen", "n/a"),
+                "latest_seen": audit.get("latest_seen", "n/a"),
+            }
+        )
+    return sorted(output, key=lambda item: (-item["skipped"], -item["opportunities"], item["market_slug"]))
+
+
+def _bucket_edges(values: list[float]) -> dict[str, int]:
+    buckets = Counter()
+    for value in values:
+        if value < -0.05:
+            buckets["edge < -0.05"] += 1
+        elif value < 0.0:
+            buckets["-0.05 to 0"] += 1
+        elif value < 0.01:
+            buckets["0 to 0.01"] += 1
+        elif value < 0.03:
+            buckets["0.01 to 0.03"] += 1
+        elif value < 0.05:
+            buckets["0.03 to 0.05"] += 1
+        else:
+            buckets["> 0.05"] += 1
+    return dict(buckets)
+
+
+def _bucket_pair_costs(values: list[float]) -> dict[str, int]:
+    buckets = Counter()
+    for value in values:
+        if value > 1.02:
+            buckets["pair cost > 1.02"] += 1
+        elif value >= 1.00:
+            buckets["1.00 to 1.02"] += 1
+        elif value >= 0.99:
+            buckets["0.99 to 1.00"] += 1
+        elif value >= 0.97:
+            buckets["0.97 to 0.99"] += 1
+        else:
+            buckets["< 0.97"] += 1
+    return dict(buckets)
+
+
+def _safe_avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _fmt_float(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.4f}"
+
+
+def _fmt_map(values: dict[str, Any]) -> str:
+    if not values:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in values.items())
+
+
+def _fmt_pairs(values: list[tuple[str, int]]) -> str:
+    if not values:
+        return "none"
+    return ", ".join(f"{key}={count}" for key, count in values)
+
+
+def _single_value(rows: list[Any], field: str) -> str | None:
+    values = {str(row[field]) for row in rows}
+    return next(iter(values)) if len(values) == 1 else None

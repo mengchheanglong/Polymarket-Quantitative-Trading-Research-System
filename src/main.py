@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,8 +16,10 @@ from src.models import Asset, OpportunityDecision, OrderBook, Signal
 from src.reports.backtest import build_backtest_report
 from src.reports.compare import build_strategy_comparison
 from src.reports.dataset import build_dataset_summary
+from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
 from src.reports.summary import build_report
+from src.reports.sweep import SweepRow, build_sweep_report
 from src.safety import SafetyError, enforce_paper_only
 from src.simulator.engine import PaperTradingEngine
 from src.storage.export import export_csv
@@ -79,7 +82,16 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     backtest_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
     subcommands.add_parser("runs", help="List experiment runs")
-    subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
+    compare_parser = subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
+    compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    diagnostics_parser = subcommands.add_parser("diagnostics", help="Explain accepted/skipped paper opportunities")
+    diagnostics_parser.add_argument("--run-id", help="Inspect a specific run.")
+    diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Filter by strategy.")
+    diagnostics_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    sweep_parser = subcommands.add_parser("sweep", help="Run a paper-only threshold sweep on stored snapshots")
+    sweep_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), required=True)
+    sweep_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    sweep_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
     reset_parser.add_argument("--paper-results", action="store_true", help="Delete paper runs, trades, opportunities, and equity only.")
     reset_parser.add_argument("--all", action="store_true", help="Delete paper results and collected snapshot data.")
@@ -130,7 +142,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "runs":
             return runs(config)
         if args.command == "compare":
-            return compare(config)
+            return compare(config, args)
+        if args.command == "diagnostics":
+            return diagnostics(config, args)
+        if args.command == "sweep":
+            return sweep(config, args)
         if args.command == "reset":
             return reset(config, args)
         if args.command == "observe":
@@ -422,83 +438,27 @@ def replay(config: AgentConfig, args) -> int:
     try:
         source_filter = _clean_source_filter(getattr(args, "source", None))
         since = _parse_since(getattr(args, "since", None))
-        current_prices, candle_source, markets, orderbook_source, settlement_prices, actual_sources = _load_replay_context(
-            store,
+        outcome = _simulate_replay(
+            config,
             source_filter=source_filter,
             since=since,
+            now=now,
+            data_store=store,
+            result_store=store,
+            mode="replay",
+            since_label=getattr(args, "since", None),
         )
         print(f"Replay source filter: {source_filter or 'all'}")
-        print(f"Replay stored sources: {_format_sources(actual_sources)}")
-        if not current_prices:
-            print(
-                "Replay cannot run: no stored BTC/ETH price snapshots for the requested source. "
-                "Run observe for public data or collect --demo for demo data."
-            )
+        print(f"Replay stored sources: {_format_sources(outcome['actual_sources'])}")
+        if not outcome["ok"]:
+            print(outcome["message"])
             return 1
-        if not markets:
-            if source_filter == "public":
-                print(
-                    "Replay cannot run with --source public: public data is insufficient; "
-                    "no stored public Polymarket markets were found. Demo data was not used."
-                )
-            else:
-                print(
-                    "Replay cannot run: no stored Polymarket markets for the requested source. "
-                    "Observe may not have found UP/DOWN markets; use collect --demo for a complete offline dataset."
-                )
-            return 1
-        missing_books = [
-            market.slug
-            for market in markets
-            if orderbook_source.orderbook(market.up_token_id) is None
-            or orderbook_source.orderbook(market.down_token_id) is None
-        ]
-        if missing_books and source_filter == "public":
-            print(
-                "Replay cannot run with --source public: public data is insufficient; "
-                "stored public orderbooks are missing for " + ", ".join(missing_books[:5]) + ". "
-                "Demo data was not used."
-            )
-            return 1
-        if missing_books and config.strategy == "pair-cost":
-            print(
-                "Replay cannot run pair-cost: missing stored orderbooks for "
-                + ", ".join(missing_books[:5])
-            )
-            return 1
-        run_id = store.start_run(
-            strategy=config.strategy,
-            mode="replay",
-            data_source=source_filter or "all",
-            starting_balance=config.starting_balance,
-            now=now,
-            notes=f"{_config_notes(config)}; source_filter={source_filter or 'all'}; since={getattr(args, 'since', None) or 'none'}",
-        )
-        engine = PaperTradingEngine(config, store, run_id=run_id)
-        engine.record_equity(now)
-        if config.strategy == "pair-cost":
-            accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
-        else:
-            accepted, skipped = _run_momentum(
-                engine,
-                markets,
-                orderbook_source,
-                candle_source,
-                current_prices,
-                now,
-            )
-        closed = 0
-        if settlement_prices:
-            settlement_now = max(market.window.end for market in markets)
-            closed = engine.close_expired(settlement_prices, now=settlement_now)
-            now = settlement_now
-        store.set_state("last_replay_strategy", config.strategy, now)
-        store.finish_run(run_id, now)
+        store.set_state("last_replay_strategy", config.strategy, outcome["finished_at"])
         print(
-            f"Replay complete. Strategy: {config.strategy}; accepted fake trades: {accepted}; "
-            f"skipped: {skipped}; closed: {closed}."
+            f"Replay complete. Strategy: {config.strategy}; accepted fake trades: {outcome['accepted']}; "
+            f"skipped: {outcome['skipped']}; closed: {outcome['closed']}."
         )
-        print(f"Run ID: {run_id}")
+        print(f"Run ID: {outcome['run_id']}")
     finally:
         store.close()
     return 0
@@ -551,12 +511,73 @@ def runs(config: AgentConfig) -> int:
     return 0
 
 
-def compare(config: AgentConfig) -> int:
+def compare(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        print(build_strategy_comparison(store))
+        print(build_strategy_comparison(store, source_filter=_clean_source_filter(getattr(args, "source", None))))
     finally:
         store.close()
+    return 0
+
+
+def diagnostics(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        print(
+            build_diagnostics(
+                store,
+                run_id=getattr(args, "run_id", None),
+                strategy=getattr(args, "strategy", None),
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+            )
+        )
+    finally:
+        store.close()
+    return 0
+
+
+def sweep(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None))
+    since = _parse_since(getattr(args, "since", None))
+    strategy = getattr(args, "strategy")
+    data_store = SQLiteStore(config.database_path)
+    try:
+        rows: list[SweepRow] = []
+        for override in _sweep_configs(config, strategy):
+            with tempfile.TemporaryDirectory(prefix="paper-sweep-") as temp_dir:
+                scratch = SQLiteStore(Path(temp_dir) / "sweep.sqlite3")
+                try:
+                    outcome = _simulate_replay(
+                        override,
+                        source_filter=source_filter,
+                        since=since,
+                        now=datetime.now(timezone.utc),
+                        data_store=data_store,
+                        result_store=scratch,
+                        mode="sweep",
+                        since_label=getattr(args, "since", None),
+                    )
+                    if not outcome["ok"]:
+                        print(outcome["message"])
+                        return 1
+                    report = build_report(scratch, override.starting_balance, run_id=outcome["run_id"])
+                    rows.append(
+                        SweepRow(
+                            label=_sweep_label(override),
+                            accepted_trades=outcome["accepted"],
+                            skipped_opportunities=outcome["skipped"],
+                            realized_pnl=report.realized_pnl,
+                            win_rate=report.win_rate,
+                            max_equity_drawdown=report.max_equity_drawdown,
+                            max_position_exposure=report.max_position_exposure,
+                            average_edge=report.average_edge,
+                        )
+                    )
+                finally:
+                    scratch.close()
+        print(build_sweep_report(strategy, source_filter, rows))
+    finally:
+        data_store.close()
     return 0
 
 
@@ -756,6 +777,7 @@ def _run_pair_cost(
 ) -> tuple[int, int]:
     strategy = PairCostArbitrageStrategy(
         threshold=config.pair_cost_threshold,
+        max_spread=config.max_spread,
         slippage_bps=config.slippage_bps,
         failed_second_leg_probability=config.pair_cost_failed_second_leg_probability,
         random_seed=config.random_seed,
@@ -774,6 +796,105 @@ def _run_pair_cost(
         else:
             skipped += 1
     return accepted, skipped
+
+
+def _simulate_replay(
+    config: AgentConfig,
+    *,
+    source_filter: str | None,
+    since: datetime | None,
+    now: datetime,
+    data_store: SQLiteStore,
+    result_store: SQLiteStore,
+    mode: str,
+    since_label: str | None,
+) -> dict:
+    current_prices, candle_source, markets, orderbook_source, settlement_prices, actual_sources = _load_replay_context(
+        data_store,
+        source_filter=source_filter,
+        since=since,
+    )
+    if not current_prices:
+        return {
+            "ok": False,
+            "actual_sources": actual_sources,
+            "message": (
+                "Replay cannot run: no stored BTC/ETH price snapshots for the requested source. "
+                "Run observe for public data or collect --demo for demo data."
+            ),
+        }
+    if not markets:
+        if source_filter == "public":
+            message = (
+                "Replay cannot run with --source public: public data is insufficient; "
+                "no stored public Polymarket markets were found. Demo data was not used."
+            )
+        else:
+            message = (
+                "Replay cannot run: no stored Polymarket markets for the requested source. "
+                "Observe may not have found UP/DOWN markets; use collect --demo for a complete offline dataset."
+            )
+        return {"ok": False, "actual_sources": actual_sources, "message": message}
+    missing_books = [
+        market.slug
+        for market in markets
+        if orderbook_source.orderbook(market.up_token_id) is None
+        or orderbook_source.orderbook(market.down_token_id) is None
+    ]
+    if missing_books and source_filter == "public":
+        return {
+            "ok": False,
+            "actual_sources": actual_sources,
+            "message": (
+                "Replay cannot run with --source public: public data is insufficient; "
+                "stored public orderbooks are missing for " + ", ".join(missing_books[:5]) + ". "
+                "Demo data was not used."
+            ),
+        }
+    if missing_books and config.strategy == "pair-cost":
+        return {
+            "ok": False,
+            "actual_sources": actual_sources,
+            "message": "Replay cannot run pair-cost: missing stored orderbooks for " + ", ".join(missing_books[:5]),
+        }
+
+    run_id = result_store.start_run(
+        strategy=config.strategy,
+        mode=mode,
+        data_source=source_filter or "all",
+        starting_balance=config.starting_balance,
+        now=now,
+        notes=f"{_config_notes(config)}; source_filter={source_filter or 'all'}; since={since_label or 'none'}",
+    )
+    engine = PaperTradingEngine(config, result_store, run_id=run_id)
+    engine.record_equity(now)
+    if config.strategy == "pair-cost":
+        accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
+    else:
+        accepted, skipped = _run_momentum(
+            engine,
+            markets,
+            orderbook_source,
+            candle_source,
+            current_prices,
+            now,
+        )
+    closed = 0
+    finished_at = now
+    if settlement_prices:
+        settlement_now = max(market.window.end for market in markets)
+        closed = engine.close_expired(settlement_prices, now=settlement_now)
+        finished_at = settlement_now
+    result_store.finish_run(run_id, finished_at)
+    return {
+        "ok": True,
+        "actual_sources": actual_sources,
+        "accepted": accepted,
+        "skipped": skipped,
+        "closed": closed,
+        "run_id": run_id,
+        "finished_at": finished_at,
+    }
 
 
 def _effective_data_mode(config: AgentConfig, store: SQLiteStore) -> str:
@@ -1031,6 +1152,10 @@ def _replace_strategy(config: AgentConfig, value: str) -> AgentConfig:
     return AgentConfig(**{**config.__dict__, "strategy": value})
 
 
+def _replace_config_values(config: AgentConfig, **updates) -> AgentConfig:
+    return AgentConfig(**{**config.__dict__, **updates})
+
+
 def _asset_filter(value: str) -> Asset | None:
     if value == "BTC":
         return Asset.BTC
@@ -1052,10 +1177,43 @@ def _observe_cycles(duration_minutes: float | None, interval_seconds: float, cyc
 
 def _config_notes(config: AgentConfig) -> str:
     return (
-        f"min_edge={config.min_edge}; fee_bps={config.fee_bps}; "
+        f"min_edge={config.min_edge}; max_spread={config.max_spread}; fee_bps={config.fee_bps}; "
         f"slippage_bps={config.slippage_bps}; max_position_pct={config.max_position_pct}; "
-        f"max_position_usd={config.max_position_usd}"
+        f"max_position_usd={config.max_position_usd}; failed_fill_probability={config.failed_fill_probability}; "
+        f"pair_cost_threshold={config.pair_cost_threshold}; "
+        f"pair_cost_failed_second_leg_probability={config.pair_cost_failed_second_leg_probability}"
     )
+
+
+def _sweep_configs(config: AgentConfig, strategy: str) -> list[AgentConfig]:
+    if strategy == "momentum":
+        return [
+            _replace_config_values(config, strategy="momentum", min_edge=min_edge, max_spread=max_spread)
+            for min_edge in (0.00, 0.01, 0.02, 0.03)
+            for max_spread in (0.02, 0.05, 0.10)
+        ]
+    return [
+        _replace_config_values(
+            config,
+            strategy="pair-cost",
+            pair_cost_threshold=threshold,
+            max_spread=max_spread,
+            pair_cost_failed_second_leg_probability=failed_leg_probability,
+        )
+        for threshold in (0.98, 0.99, 1.00)
+        for max_spread in (0.02, 0.05, 0.10)
+        for failed_leg_probability in (0.0, 0.1)
+    ]
+
+
+def _sweep_label(config: AgentConfig) -> str:
+    if config.strategy == "pair-cost":
+        return (
+            f"pair_cost_threshold={config.pair_cost_threshold:.2f}"
+            f"; max_spread={config.max_spread:.2f}"
+            f"; failed_second_leg_probability={config.pair_cost_failed_second_leg_probability:.2f}"
+        )
+    return f"min_edge={config.min_edge:.2f}; max_spread={config.max_spread:.2f}"
 
 
 def _fmt_money(value) -> str:

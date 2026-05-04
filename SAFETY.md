@@ -15,6 +15,7 @@ Phase 1 is paper-only by design.
 - Public data collection can fail when DNS or network access is unavailable. Failures are recorded as raw snapshots and the CLI suggests demo mode.
 - Public collection uses unauthenticated exchange and Polymarket endpoints only.
 - Replay mode reads stored SQLite snapshots and does not call external APIs.
+- Diagnostics and sweep modes read stored SQLite snapshots only and do not call external APIs.
 - Source-aware replay can be restricted to `--source demo` or `--source public`; public replay does not silently fall back to demo data.
 - Backtest reporting summarizes stored snapshots, fake trades, and data quality only, and can be filtered by source.
 - `discover-markets` and `observe` use only public Gamma and public CLOB market-data endpoints.
@@ -24,6 +25,7 @@ Phase 1 is paper-only by design.
 - Dataset, readiness, market audit, and export commands can separate demo snapshots from public snapshots.
 - Export writes local research CSV files only. There are no wallet, private-key, signer, or credential columns.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
+- Threshold sweeps are temporary paper-only research runs against stored snapshots. They do not modify the default config and do not prove live profitability.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
 - `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.
@@ -40,5 +42,7 @@ Report metrics are paper metrics only:
 - `Max position exposure` is reported separately from drawdown.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale data, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
+
+Skip-heavy results are not a failure by themselves. A paper-only engine that rejects negative-edge or wide-spread public opportunities is behaving more safely than one that forces simulated fills to manufacture activity.
 
 Source filters are safety and research-integrity controls. Use `--source public` when evaluating observed public data and `--source demo` when validating deterministic offline behavior. Mixed datasets are allowed in one SQLite file, but readiness and reports make the mix explicit so mock data is not mistaken for public market evidence.

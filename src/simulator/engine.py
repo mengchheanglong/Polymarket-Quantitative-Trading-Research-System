@@ -51,6 +51,8 @@ class PaperTradingEngine:
             return OpportunityDecision(market, signal, market_price, spread, "SKIP", "outside timing window")
         if market_price is None:
             return OpportunityDecision(market, signal, market_price, spread, "SKIP", "missing market price")
+        if spread is not None and spread > self.config.max_spread:
+            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "spread above threshold")
         estimated_edge = signal.probability - market_price - (spread or 0.0) / 2.0
         signal = Signal(
             asset=signal.asset,
@@ -136,7 +138,7 @@ class PaperTradingEngine:
                 market=decision.market,
                 signal=signal,
                 market_price=decision.pair_cost,
-                spread=None,
+                spread=decision.combined_spread,
                 decision=decision.decision,
                 reason=decision.reason,
             ),

@@ -29,6 +29,8 @@ python -m src.main report
 python -m src.main trades
 python -m src.main replay --strategy momentum
 python -m src.main backtest-report
+python -m src.main diagnostics --source demo
+python -m src.main sweep --strategy momentum --source demo
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
@@ -72,6 +74,8 @@ python -m src.main readiness --source public
 python -m src.main discover-markets --asset BTC
 python -m src.main discover-markets --asset ETH
 python -m src.main markets --source public
+python -m src.main diagnostics --source public
+python -m src.main sweep --strategy momentum --source public
 ```
 
 Export local research data:
@@ -130,6 +134,26 @@ Compare strategies across stored runs:
 
 ```powershell
 python -m src.main compare
+python -m src.main compare --source public
+python -m src.main compare --source demo
+```
+
+Inspect skip reasons and market-level diagnostics:
+
+```powershell
+python -m src.main diagnostics --source demo
+python -m src.main diagnostics --source public
+python -m src.main diagnostics --strategy momentum --source public
+python -m src.main diagnostics --strategy pair-cost --source public
+```
+
+Run a research-only threshold sweep on stored snapshots:
+
+```powershell
+python -m src.main sweep --strategy momentum --source demo
+python -m src.main sweep --strategy pair-cost --source demo
+python -m src.main sweep --strategy momentum --source public
+python -m src.main sweep --strategy pair-cost --source public
 ```
 
 Report scopes:
@@ -185,3 +209,4 @@ Public discovery process:
 - Direct `btc-updown-*` and `eth-updown-*` slug probes near the current time.
 - Token extraction from public `clobTokenIds`, `tokens`, and outcome-token objects.
 - Public CLOB orderbook capture through public market-data endpoints only.
+- Diagnostics and sweeps use stored snapshots only. They never call external APIs.

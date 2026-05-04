@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.reports.config_view import format_config_view, merged_config_view
 from src.storage.sqlite import SQLiteStore
 
 
 @dataclass(frozen=True)
 class Report:
     scope: str
+    strategy: str
+    mode: str
+    data_source: str
+    config_summary: str
     starting_balance: float
     current_balance: float
     realized_pnl: float
@@ -25,6 +30,10 @@ class Report:
             [
                 "Paper trading report",
                 f"Scope: {self.scope}",
+                f"Strategy: {self.strategy}",
+                f"Mode: {self.mode}",
+                f"Data source: {self.data_source}",
+                f"Config: {self.config_summary}",
                 f"Starting balance: ${self.starting_balance:.2f}",
                 f"Current cash balance: ${self.current_balance:.2f}",
                 f"Realized fake PnL: ${self.realized_pnl:.2f}",
@@ -47,7 +56,8 @@ def build_report(
     strategy: str | None = None,
     all_runs: bool = False,
 ) -> Report:
-    run_ids = _resolve_run_ids(store, run_id, strategy, all_runs)
+    run_rows = _resolve_run_rows(store, run_id, strategy, all_runs)
+    run_ids = [str(row["run_id"]) for row in run_rows]
     scope = _scope_label(run_ids, run_id, strategy, all_runs)
     if run_ids:
         placeholders = ",".join("?" for _ in run_ids)
@@ -115,8 +125,15 @@ def build_report(
         [open_exposure, *[float(row["position_exposure"]) for row in exposure_rows]],
         default=0.0,
     )
+    strategies = sorted({str(row["strategy"]) for row in run_rows}) if run_rows else []
+    modes = sorted({str(row["mode"]) for row in run_rows}) if run_rows else []
+    data_sources = sorted({str(row["data_source"]) for row in run_rows}) if run_rows else []
     return Report(
         scope=scope,
+        strategy=_single_or_mixed(strategies),
+        mode=_single_or_mixed(modes),
+        data_source=_single_or_mixed(data_sources),
+        config_summary=format_config_view(merged_config_view([row["notes"] for row in run_rows])),
         starting_balance=starting_balance,
         current_balance=current_balance,
         realized_pnl=realized_pnl,
@@ -131,26 +148,25 @@ def build_report(
     )
 
 
-def _resolve_run_ids(
+def _resolve_run_rows(
     store: SQLiteStore,
     run_id: str | None,
     strategy: str | None,
     all_runs: bool,
-) -> list[str]:
+) -> list:
     if run_id:
-        return [run_id]
+        row = store.run_by_id(run_id)
+        return [row] if row else []
     if strategy:
-        return [
-            str(row["run_id"])
-            for row in store.rows(
-                "SELECT run_id FROM runs WHERE strategy = ? ORDER BY started_at, rowid",
-                (strategy,),
-            )
-        ]
+        return store.rows(
+            "SELECT * FROM runs WHERE strategy = ? ORDER BY started_at, rowid",
+            (strategy,),
+        )
     if all_runs:
-        return [str(row["run_id"]) for row in store.run_rows()]
+        return store.run_rows()
     latest = store.latest_run_id()
-    return [latest] if latest else []
+    row = store.run_by_id(latest) if latest else None
+    return [row] if row else []
 
 
 def _scope_label(run_ids: list[str], run_id: str | None, strategy: str | None, all_runs: bool) -> str:
@@ -172,3 +188,9 @@ def _max_drawdown(values: list[float]) -> float:
         peak = max(peak, value)
         max_dd = max(max_dd, peak - value)
     return max_dd
+
+
+def _single_or_mixed(values: list[str]) -> str:
+    if not values:
+        return "n/a"
+    return values[0] if len(values) == 1 else "mixed"

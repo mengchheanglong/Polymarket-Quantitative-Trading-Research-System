@@ -15,6 +15,8 @@ python -m src.main report
 python -m src.main trades
 python -m src.main replay --strategy momentum
 python -m src.main backtest-report
+python -m src.main diagnostics --source demo
+python -m src.main sweep --strategy momentum --source demo
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
@@ -23,6 +25,8 @@ python -m src.main discover-markets --asset BTC
 python -m src.main discover-markets --asset ETH
 python -m src.main readiness
 python -m src.main markets --source public
+python -m src.main diagnostics --source public
+python -m src.main sweep --strategy momentum --source public
 python -m src.main export --format csv --out exports --source public
 ```
 
@@ -83,6 +87,26 @@ The backtest report includes snapshot count, markets seen, opportunities, accept
 
 Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
 
+## Diagnostics And Threshold Sweeps
+
+Phase 8 adds paper-only diagnostics and threshold sweeps:
+
+```powershell
+python -m src.main diagnostics --source public
+python -m src.main diagnostics --strategy momentum --source public
+python -m src.main diagnostics --strategy pair-cost --source public
+python -m src.main sweep --strategy momentum --source public
+python -m src.main sweep --strategy pair-cost --source public
+```
+
+Diagnostics summarize total opportunities, accepted trades, skipped opportunities, skipped-by-reason counts, edge and spread stats, pair-cost stats, edge-distribution buckets, pair-cost buckets, near-threshold opportunities, and market-level diagnostics.
+
+Reports now show the active paper thresholds and assumptions, including `MIN_EDGE`, `MAX_SPREAD`, `PAIR_COST_THRESHOLD`, fees, slippage, position sizing, and failed-fill assumptions.
+
+Accepted `0` trades can be the correct result. If diagnostics show negative edge, wide spreads, or pair cost above threshold, the safe paper engine should keep skipping instead of forcing bad simulated entries.
+
+Threshold sweeps are research only. They replay stored snapshots with temporary paper-only overrides and do not modify the default config, do not call external APIs, and do not prove live profitability even if a row looks better than the default.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.
@@ -130,6 +154,9 @@ python -m src.main dataset --source public
 python -m src.main readiness
 python -m src.main replay --strategy momentum --source public
 python -m src.main replay --strategy pair-cost --source public
+python -m src.main diagnostics --source public
+python -m src.main sweep --strategy momentum --source public
+python -m src.main sweep --strategy pair-cost --source public
 python -m src.main compare
 python -m src.main export --format csv --out exports --source public
 ```
@@ -209,6 +236,8 @@ Compare stored strategies without calling external APIs:
 
 ```powershell
 python -m src.main compare
+python -m src.main compare --source public
+python -m src.main compare --source demo
 ```
 
 Reset paper results while keeping raw snapshots:
