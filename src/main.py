@@ -66,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Paper strategy to replay.",
     )
+    replay_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    replay_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     replay_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
     backtest_parser.add_argument(
@@ -74,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Strategy label to show in the report.",
     )
+    backtest_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    backtest_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
     subcommands.add_parser("runs", help="List experiment runs")
     subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
     reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
@@ -83,10 +87,20 @@ def main(argv: list[str] | None = None) -> int:
     observe_parser.add_argument("--duration-minutes", type=float, default=None, help="Maximum observe duration.")
     observe_parser.add_argument("--interval-seconds", type=float, default=15.0, help="Seconds between cycles.")
     observe_parser.add_argument("--cycles", type=int, default=None, help="Maximum cycles, useful for tests.")
-    subcommands.add_parser("dataset", help="Summarize stored public/demo snapshots")
+    dataset_parser = subcommands.add_parser("dataset", help="Summarize stored public/demo snapshots")
+    dataset_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    dataset_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
+    readiness_parser = subcommands.add_parser("readiness", help="Check whether stored data is replay-ready")
+    readiness_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    readiness_parser.add_argument("--since", help="Only inspect snapshots at or after this UTC ISO timestamp.")
+    markets_parser = subcommands.add_parser("markets", help="Audit discovered Polymarket markets")
+    markets_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    markets_parser.add_argument("--since", help="Only inspect markets collected at or after this UTC ISO timestamp.")
     export_parser = subcommands.add_parser("export", help="Export local research data")
     export_parser.add_argument("--format", choices=("csv",), default="csv")
     export_parser.add_argument("--out", default="exports")
+    export_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    export_parser.add_argument("--since", help="Only export raw snapshots at or after this UTC ISO timestamp.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -108,9 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "trades":
             return trades(config, args)
         if args.command == "replay":
-            return replay(config)
+            return replay(config, args)
         if args.command == "backtest-report":
-            return backtest_report(config)
+            return backtest_report(config, args)
         if args.command == "runs":
             return runs(config)
         if args.command == "compare":
@@ -120,7 +134,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "observe":
             return observe(config, args)
         if args.command == "dataset":
-            return dataset(config)
+            return dataset(config, args)
+        if args.command == "readiness":
+            return readiness(config, args)
+        if args.command == "markets":
+            return market_audit(config, args)
         if args.command == "export":
             return export_data(config, args)
     except SafetyError as exc:
@@ -163,7 +181,7 @@ def collect(config: AgentConfig) -> int:
                     source=snapshot.source,
                     observed_at=now,
                 )
-            store.replace_collected_market_data(now, markets, orderbooks)
+            store.replace_collected_market_data(now, markets, orderbooks, source_name="mock:demo")
             _log_market_raw_snapshots(store, now, "mock:demo", markets, orderbooks, "ok")
             for settlement in demo.settlement_prices(now=now):
                 store.log_raw_snapshot(
@@ -248,6 +266,7 @@ def collect(config: AgentConfig) -> int:
         if not markets:
             print("No active short-duration BTC/ETH UP-DOWN markets discovered from public endpoints.")
             print("Use collect --demo or USE_MOCK_DATA=true for offline demo data.")
+            store.replace_collected_market_data(now, [], {}, source_name="polymarket-public")
             store.log_raw_snapshot(
                 now,
                 "polymarket-public",
@@ -277,7 +296,7 @@ def collect(config: AgentConfig) -> int:
                 orderbooks[market.up_token_id] = up_book
                 orderbooks[market.down_token_id] = down_book
                 complete_markets.append(market)
-            store.replace_collected_market_data(now, complete_markets, orderbooks)
+            store.replace_collected_market_data(now, complete_markets, orderbooks, source_name="polymarket-public")
             _log_market_raw_snapshots(store, now, "polymarket-public", markets, orderbooks, "ok")
             store.set_state("last_collection_mode", "public", now)
             print(f"Discovered {len(markets)} candidate Polymarket UP/DOWN markets.")
@@ -393,16 +412,36 @@ def trades(config: AgentConfig, args) -> int:
     return 0
 
 
-def replay(config: AgentConfig) -> int:
+def replay(config: AgentConfig, args) -> int:
     now = datetime.now(timezone.utc)
     store = SQLiteStore(config.database_path)
     try:
-        current_prices, candle_source, markets, orderbook_source, settlement_prices = _load_replay_context(store)
+        source_filter = _clean_source_filter(getattr(args, "source", None))
+        since = _parse_since(getattr(args, "since", None))
+        current_prices, candle_source, markets, orderbook_source, settlement_prices, actual_sources = _load_replay_context(
+            store,
+            source_filter=source_filter,
+            since=since,
+        )
+        print(f"Replay source filter: {source_filter or 'all'}")
+        print(f"Replay stored sources: {_format_sources(actual_sources)}")
         if not current_prices:
-            print("Replay cannot run: no stored BTC/ETH price snapshots. Run observe, collect, or collect --demo first.")
+            print(
+                "Replay cannot run: no stored BTC/ETH price snapshots for the requested source. "
+                "Run observe for public data or collect --demo for demo data."
+            )
             return 1
         if not markets:
-            print("Replay cannot run: no stored Polymarket markets. Observe may not have found UP/DOWN markets; use collect --demo for a complete offline dataset.")
+            if source_filter == "public":
+                print(
+                    "Replay cannot run with --source public: public data is insufficient; "
+                    "no stored public Polymarket markets were found. Demo data was not used."
+                )
+            else:
+                print(
+                    "Replay cannot run: no stored Polymarket markets for the requested source. "
+                    "Observe may not have found UP/DOWN markets; use collect --demo for a complete offline dataset."
+                )
             return 1
         missing_books = [
             market.slug
@@ -419,10 +458,10 @@ def replay(config: AgentConfig) -> int:
         run_id = store.start_run(
             strategy=config.strategy,
             mode="replay",
-            data_source="replay",
+            data_source=source_filter or "all",
             starting_balance=config.starting_balance,
             now=now,
-            notes=_config_notes(config),
+            notes=f"{_config_notes(config)}; source_filter={source_filter or 'all'}; since={getattr(args, 'since', None) or 'none'}",
         )
         engine = PaperTradingEngine(config, store, run_id=run_id)
         engine.record_equity(now)
@@ -454,11 +493,19 @@ def replay(config: AgentConfig) -> int:
     return 0
 
 
-def backtest_report(config: AgentConfig) -> int:
+def backtest_report(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         strategy = store.get_state("last_replay_strategy") or config.strategy
-        print(build_backtest_report(store, config.starting_balance, strategy).as_text())
+        print(
+            build_backtest_report(
+                store,
+                config.starting_balance,
+                strategy,
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+                since=_parse_since(getattr(args, "since", None)),
+            ).as_text()
+        )
     finally:
         store.close()
     return 0
@@ -519,10 +566,16 @@ def reset(config: AgentConfig, args) -> int:
         store.close()
 
 
-def dataset(config: AgentConfig) -> int:
+def dataset(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        print(build_dataset_summary(store))
+        print(
+            build_dataset_summary(
+                store,
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+                since=_parse_since(getattr(args, "since", None)),
+            )
+        )
     finally:
         store.close()
     return 0
@@ -531,10 +584,72 @@ def dataset(config: AgentConfig) -> int:
 def export_data(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        paths = export_csv(store, args.out)
+        paths = export_csv(
+            store,
+            args.out,
+            source_filter=_clean_source_filter(getattr(args, "source", None)),
+            since=_parse_since(getattr(args, "since", None)),
+        )
         print("Export complete.")
         for path in paths:
             print(str(path))
+    finally:
+        store.close()
+    return 0
+
+
+def readiness(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        source_filter = _clean_source_filter(getattr(args, "source", None))
+        result = store.readiness(source_filter=source_filter or "all", since=_parse_since(getattr(args, "since", None)))
+        print("Dataset readiness")
+        print(f"Verdict: {result['verdict']}")
+        print(f"Source filter: {result['source_filter']}")
+        print(f"Dataset includes demo: {result['dataset_sources']['demo']}")
+        print(f"Dataset includes public: {result['dataset_sources']['public']}")
+        print(f"Exchange prices: {result['has_exchange_prices']}")
+        print(f"Polymarket markets: {result['has_polymarket_markets']}")
+        print(f"Polymarket orderbooks: {result['has_polymarket_orderbooks']}")
+        print(f"Asset overlap: {_format_sources(result['asset_overlap'])}")
+        print(f"Snapshots: {result['snapshot_count']}")
+        print(f"Markets: {result['market_count']}")
+        print(f"Orderbooks: {result['orderbook_count']}")
+        print(f"Exchange price snapshots: {result['exchange_price_count']}")
+        print(f"Wide spreads: {result['wide_spreads']}")
+        print(f"Missing orderbooks: {result['missing_orderbooks']}")
+    finally:
+        store.close()
+    return 0
+
+
+def market_audit(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        rows = store.market_audit_rows(
+            source_filter=_clean_source_filter(getattr(args, "source", None)),
+            since=_parse_since(getattr(args, "since", None)),
+        )
+        print("Polymarket market discovery audit")
+        if not rows:
+            print("No markets found for the requested source/time filter.")
+            return 0
+        for row in rows:
+            print(
+                " | ".join(
+                    [
+                        row["market_id"],
+                        row["slug"],
+                        f"asset={row['asset']}",
+                        f"source={row['source']}",
+                        f"type={row['detected_type']}",
+                        f"orderbook={row['orderbook_available']}",
+                        f"first_seen={row['first_seen']}",
+                        f"latest_seen={row['latest_seen']}",
+                        f"title={row['title']}",
+                    ]
+                )
+            )
     finally:
         store.close()
     return 0
@@ -563,7 +678,7 @@ def _run_momentum(
                 decision="SKIP",
                 reason="public orderbook unavailable",
             )
-            engine.store.log_opportunity(now, decision)
+            engine.store.log_opportunity(now, decision, run_id=engine.run_id)
             skipped += 1
             continue
 
@@ -640,10 +755,10 @@ def _load_run_context(
                 for market in markets
                 for token_id in (market.up_token_id, market.down_token_id)
             }
-            store.replace_collected_market_data(now, markets, orderbooks)
+            store.replace_collected_market_data(now, markets, orderbooks, source_name="mock:demo")
             store.set_state("last_collection_mode", "demo", now)
-        markets = store.collected_markets(mock_only=True)
-        return current_prices, _StoredCandleSource(store, "mock:demo:spot:"), markets, _StoredOrderBookSource(store), demo
+        markets = store.collected_markets(mock_only=True, source_filter="demo")
+        return current_prices, _StoredCandleSource(store, "mock:demo:spot:", source_filter="demo"), markets, _StoredOrderBookSource(store, source_filter="demo"), demo
 
     exchange = CoinbaseCollector(config.coinbase_base_url)
     current_prices = {snapshot.asset.value: snapshot for snapshot in exchange.collect_prices()}
@@ -660,29 +775,57 @@ def _load_run_context(
     return current_prices, exchange, markets, polymarket, None
 
 
-def _load_replay_context(store: SQLiteStore):
-    current_prices = store.latest_prices(source_prefix="mock:demo:spot:")
-    if not current_prices:
-        current_prices = store.latest_prices()
-    markets = store.collected_markets()
-    settlement_prices = _stored_settlement_prices(store)
+def _load_replay_context(
+    store: SQLiteStore,
+    source_filter: str | None = None,
+    since: datetime | None = None,
+):
+    if source_filter == "demo":
+        current_prices = store.latest_prices(source_prefix="mock:demo:spot:", source_filter="demo", since=since)
+        candle_prefix = "mock:demo:spot:"
+    elif source_filter == "public":
+        current_prices = store.latest_prices(source_filter="public", since=since)
+        candle_prefix = None
+    else:
+        current_prices = store.latest_prices(source_filter=source_filter, since=since)
+        candle_prefix = None
+    markets = store.collected_markets(source_filter=source_filter, since=since)
+    settlement_prices = _stored_settlement_prices(store, source_filter=source_filter, since=since)
+    actual_sources = [str(row["source_name"]) for row in store.raw_snapshot_rows(source_filter=source_filter, since=since)]
     return (
         current_prices,
-        _StoredCandleSource(store, ""),
+        _StoredCandleSource(store, candle_prefix, source_filter=source_filter, since=since),
         markets,
-        _StoredOrderBookSource(store),
+        _StoredOrderBookSource(store, source_filter=source_filter, since=since),
         settlement_prices,
+        sorted(set(actual_sources)),
     )
 
 
-def _stored_settlement_prices(store: SQLiteStore):
+def _stored_settlement_prices(
+    store: SQLiteStore,
+    source_filter: str | None = None,
+    since: datetime | None = None,
+):
+    clauses = ["snapshot_type = 'settlement_price'", "status = 'ok'"]
+    params = []
+    if source_filter == "demo":
+        clauses.append("source_name LIKE ?")
+        params.append("mock:%")
+    elif source_filter == "public":
+        clauses.append("source_name NOT LIKE ?")
+        params.append("mock:%")
+    if since is not None:
+        clauses.append("observed_at >= ?")
+        params.append(since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
     rows = store.rows(
-        """
+        f"""
         SELECT asset, payload_json, observed_at, source_name
         FROM raw_snapshots
-        WHERE snapshot_type = 'settlement_price' AND status = 'ok'
+        WHERE {' AND '.join(clauses)}
         ORDER BY observed_at DESC, id DESC
-        """
+        """,
+        tuple(params),
     )
     import json
 
@@ -796,22 +939,63 @@ def _fmt_money(value) -> str:
     return f"${float(value):.2f}"
 
 
+def _clean_source_filter(value: str | None) -> str | None:
+    if value in (None, "", "all"):
+        return None
+    return value
+
+
+def _parse_since(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_sources(values) -> str:
+    items = [str(value) for value in values]
+    return ", ".join(items) if items else "none"
+
+
 class _StoredCandleSource:
-    def __init__(self, store: SQLiteStore, source_prefix: str):
+    def __init__(
+        self,
+        store: SQLiteStore,
+        source_prefix: str | None,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+    ):
         self.store = store
         self.source_prefix = source_prefix
+        self.source_filter = source_filter
+        self.since = since
 
     def recent_candles(self, asset: Asset, granularity: int = 60):
         prefix = self.source_prefix or None
-        return self.store.recent_candles(asset.value, limit=5, source_prefix=prefix)
+        return self.store.recent_candles(
+            asset.value,
+            limit=5,
+            source_prefix=prefix,
+            source_filter=self.source_filter,
+            since=self.since,
+        )
 
 
 class _StoredOrderBookSource:
-    def __init__(self, store: SQLiteStore):
+    def __init__(
+        self,
+        store: SQLiteStore,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+    ):
         self.store = store
+        self.source_filter = source_filter
+        self.since = since
 
     def orderbook(self, token_id: str) -> OrderBook | None:
-        return self.store.collected_orderbook(token_id)
+        return self.store.collected_orderbook(token_id, source_filter=self.source_filter, since=self.since)
 
 
 if __name__ == "__main__":

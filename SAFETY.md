@@ -15,8 +15,10 @@ Phase 1 is paper-only by design.
 - Public data collection can fail when DNS or network access is unavailable. Failures are recorded as raw snapshots and the CLI suggests demo mode.
 - Public collection uses unauthenticated exchange and Polymarket endpoints only.
 - Replay mode reads stored SQLite snapshots and does not call external APIs.
-- Backtest reporting summarizes stored snapshots, fake trades, and data quality only.
+- Source-aware replay can be restricted to `--source demo` or `--source public`; public replay does not silently fall back to demo data.
+- Backtest reporting summarizes stored snapshots, fake trades, and data quality only, and can be filtered by source.
 - Observe mode only collects public snapshots. It never simulates trades or executes trades.
+- Dataset, readiness, market audit, and export commands can separate demo snapshots from public snapshots.
 - Export writes local research CSV files only. There are no wallet, private-key, signer, or credential columns.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
@@ -35,3 +37,5 @@ Report metrics are paper metrics only:
 - `Max position exposure` is reported separately from drawdown.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale data, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
+
+Source filters are safety and research-integrity controls. Use `--source public` when evaluating observed public data and `--source demo` when validating deterministic offline behavior. Mixed datasets are allowed in one SQLite file, but readiness and reports make the mix explicit so mock data is not mistaken for public market evidence.

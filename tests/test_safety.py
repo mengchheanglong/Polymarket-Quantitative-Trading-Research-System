@@ -50,10 +50,14 @@ def test_no_live_execution_dependencies_or_wallet_code():
         "create_wallet",
         "signing",
         "signer",
+        "PRIVATE_KEY",
     ]
     for path in Path("src").rglob("*.py"):
-        text = path.read_text(encoding="utf-8").lower()
+        raw_text = path.read_text(encoding="utf-8")
+        text = raw_text.lower()
         for token in forbidden_tokens:
-            assert token not in text, f"{token} found in {path}"
+            haystack = raw_text if token == "PRIVATE_KEY" else text
+            needle = token if token == "PRIVATE_KEY" else token.lower()
+            assert needle not in haystack, f"{token} found in {path}"
     env_text = Path(".env.example").read_text(encoding="utf-8")
     assert "PRIVATE_KEY" not in env_text

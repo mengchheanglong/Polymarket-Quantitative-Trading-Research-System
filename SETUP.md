@@ -32,8 +32,10 @@ python -m src.main backtest-report
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
-python -m src.main dataset
-python -m src.main export --format csv --out exports
+python -m src.main dataset --source public
+python -m src.main readiness
+python -m src.main markets --source public
+python -m src.main export --format csv --out exports --source public
 ```
 
 Collect public data:
@@ -55,12 +57,24 @@ Summarize the local dataset:
 
 ```powershell
 python -m src.main dataset
+python -m src.main dataset --source demo
+python -m src.main dataset --source public
+python -m src.main dataset --source public --since "2026-05-04T00:00:00"
+```
+
+Check public replay readiness and inspect market discovery:
+
+```powershell
+python -m src.main readiness
+python -m src.main readiness --source public
+python -m src.main markets --source public
 ```
 
 Export local research data:
 
 ```powershell
 python -m src.main export --format csv --out exports
+python -m src.main export --format csv --out exports --source public
 ```
 
 Run one paper cycle after public or demo collection:
@@ -90,14 +104,16 @@ python -m src.main trades
 Replay stored snapshots without external APIs:
 
 ```powershell
-python -m src.main replay --strategy momentum
-python -m src.main replay --strategy pair-cost
+python -m src.main replay --strategy momentum --source demo
+python -m src.main replay --strategy momentum --source public
+python -m src.main replay --strategy pair-cost --source public
 ```
 
 Summarize replay/backtest and data quality:
 
 ```powershell
 python -m src.main backtest-report
+python -m src.main backtest-report --source public
 ```
 
 List isolated experiment runs:
@@ -139,10 +155,12 @@ Suggested safe workflow:
 python -m src.main collect --demo
 python -m src.main run-paper --strategy momentum
 python -m src.main observe --cycles 3 --interval-seconds 0
-python -m src.main dataset
-python -m src.main replay --strategy momentum
+python -m src.main dataset --source public
+python -m src.main readiness
+python -m src.main replay --strategy momentum --source public
+python -m src.main replay --strategy pair-cost --source public
 python -m src.main compare
-python -m src.main export --format csv --out exports
+python -m src.main export --format csv --out exports --source public
 ```
 
 Run the paper-only pair-cost research skeleton:

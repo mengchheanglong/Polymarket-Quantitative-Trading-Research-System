@@ -1,6 +1,6 @@
 # Polymarket BTC/ETH UP-DOWN Paper Agent
 
-Phase 1 is a safety-first paper-trading research agent for BTC/ETH Polymarket UP/DOWN markets. It collects public Coinbase BTC/ETH prices, reads public Polymarket market and CLOB orderbook data, evaluates a simple momentum signal, and records fake paper trades in SQLite.
+This is a safety-first paper-trading research agent for BTC/ETH Polymarket UP/DOWN markets. It collects public Coinbase/Kraken BTC/ETH prices, reads public Polymarket market and CLOB orderbook data when available, evaluates paper strategies, and records fake paper trades in SQLite.
 
 It is intentionally not a trading bot. It cannot submit orders, does not manage wallets, does not require a wallet, does not require a private key, does not require Polymarket trading credentials, and defaults to `DRY_RUN=true`.
 
@@ -18,8 +18,10 @@ python -m src.main backtest-report
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
-python -m src.main dataset
-python -m src.main export --format csv --out exports
+python -m src.main dataset --source public
+python -m src.main readiness
+python -m src.main markets --source public
+python -m src.main export --format csv --out exports --source public
 ```
 
 ## What It Tracks
@@ -94,12 +96,15 @@ Summarize the local dataset:
 
 ```powershell
 python -m src.main dataset
+python -m src.main dataset --source demo
+python -m src.main dataset --source public
 ```
 
 Export local research data to CSV:
 
 ```powershell
 python -m src.main export --format csv --out exports
+python -m src.main export --format csv --out exports --source public
 ```
 
 Exports include raw snapshot summaries, trades, skipped opportunities, runs, and equity snapshots. There are no wallet/private-key fields to export.
@@ -109,12 +114,55 @@ Suggested safe workflow:
 ```powershell
 python -m src.main collect --demo
 python -m src.main run-paper --strategy momentum
+python -m src.main replay --strategy momentum --source demo
 python -m src.main observe --duration-minutes 5 --interval-seconds 15
-python -m src.main dataset
-python -m src.main replay --strategy momentum
+python -m src.main dataset --source public
+python -m src.main readiness
+python -m src.main replay --strategy momentum --source public
+python -m src.main replay --strategy pair-cost --source public
 python -m src.main compare
-python -m src.main export --format csv --out exports
+python -m src.main export --format csv --out exports --source public
 ```
+
+## Source-Aware Research
+
+Phase 6 separates deterministic demo data from observed public data. Commands that read stored snapshots can filter by source so backtests do not silently mix mock markets with real public observations:
+
+```powershell
+python -m src.main dataset --source demo
+python -m src.main dataset --source public
+python -m src.main replay --strategy momentum --source demo
+python -m src.main replay --strategy momentum --source public
+python -m src.main replay --strategy pair-cost --source public
+python -m src.main backtest-report --source public
+python -m src.main export --format csv --out exports --source public
+```
+
+Optional timestamp filters accept simple ISO timestamps:
+
+```powershell
+python -m src.main dataset --source public --since "2026-05-04T00:00:00"
+python -m src.main replay --strategy momentum --source public --since "2026-05-04T00:00:00"
+```
+
+Public replay never falls back to demo data. If public Polymarket markets or orderbooks are missing, replay exits clearly and leaves demo data unused.
+
+Check whether the dataset is ready for public replay:
+
+```powershell
+python -m src.main readiness
+python -m src.main readiness --source public
+```
+
+Readiness reports whether exchange prices, Polymarket markets, orderbooks, overlapping timestamps/assets, spreads, and snapshot counts are sufficient. Verdicts include `READY_FOR_REPLAY`, `INSUFFICIENT_PUBLIC_DATA`, `MIXED_DEMO_AND_PUBLIC_DATA`, `MISSING_ORDERBOOKS`, and `MISSING_EXCHANGE_PRICES`.
+
+Audit discovered Polymarket markets:
+
+```powershell
+python -m src.main markets --source public
+```
+
+The market audit shows market id, slug, asset, title, source, detected type, orderbook availability, first seen timestamp, and latest seen timestamp.
 
 ## Runs And Experiments
 

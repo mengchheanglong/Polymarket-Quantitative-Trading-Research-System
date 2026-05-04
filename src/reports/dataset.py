@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from src.storage.sqlite import SQLiteStore
 
 
-def build_dataset_summary(store: SQLiteStore) -> str:
-    summary = store.dataset_summary()
+def build_dataset_summary(
+    store: SQLiteStore,
+    source_filter: str | None = None,
+    since: datetime | None = None,
+) -> str:
+    summary = store.dataset_summary(source_filter=source_filter, since=since)
     return "\n".join(
         [
             "Dataset summary",
+            f"Source filter: {summary['source_filter']}",
             f"Total snapshots: {summary['total_snapshots']}",
             f"Exchange price snapshots: {summary['exchange_price_snapshots']}",
             f"Polymarket market snapshots: {summary['market_snapshots']}",
@@ -21,6 +28,8 @@ def build_dataset_summary(store: SQLiteStore) -> str:
             f"Missing orderbooks: {summary['missing_orderbooks']}",
             f"Stale snapshots: {summary['stale_snapshots']}",
             f"Data sources: {_format_map(summary['source_coverage'])}",
+            f"Includes demo data: {summary['demo_included']}",
+            f"Includes public data: {summary['public_included']}",
         ]
     )
 
