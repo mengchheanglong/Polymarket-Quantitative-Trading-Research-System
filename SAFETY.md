@@ -22,10 +22,13 @@ Phase 1 is paper-only by design.
 - Public market discovery records accepted and rejected candidates, token-id status, and public orderbook status for research auditability.
 - If public token IDs or public orderbooks are missing, public replay refuses clearly instead of substituting demo data.
 - Observe mode only collects public snapshots. It never simulates trades or executes trades.
+- Observe mode creates research sessions, keeps partial data on interruption, and never deletes data automatically.
 - Dataset, readiness, market audit, and export commands can separate demo snapshots from public snapshots.
+- Session reports and research reports summarize stored public research data only. They do not authorize trading and do not call authenticated APIs.
 - Export writes local research CSV files only. There are no wallet, private-key, signer, or credential columns.
 - The pair-cost strategy is a paper-only simulator. It models partial-fill and second-leg failure risk but cannot submit either leg anywhere.
 - Threshold sweeps are temporary paper-only research runs against stored snapshots. They do not modify the default config and do not prove live profitability.
+- Session-scoped replay, diagnostics, sweeps, backtest reports, and exports stay inside the selected research session or explicit time window.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
 - `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.

@@ -14,6 +14,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
+    session_id TEXT,
     asset TEXT NOT NULL,
     price REAL NOT NULL,
     source TEXT NOT NULL
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS bankroll (
 CREATE TABLE IF NOT EXISTS candles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
+    session_id TEXT,
     asset TEXT NOT NULL,
     candle_start TEXT NOT NULL,
     low REAL NOT NULL,
@@ -90,6 +92,22 @@ CREATE TABLE IF NOT EXISTS collected_markets (
     source_name TEXT NOT NULL DEFAULT 'unknown',
     collected_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collected_market_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    observed_at TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    market_slug TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    up_token_id TEXT NOT NULL,
+    down_token_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    is_mock INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS collected_orderbooks (
     token_id TEXT PRIMARY KEY,
     market_slug TEXT NOT NULL,
@@ -102,9 +120,24 @@ CREATE TABLE IF NOT EXISTS collected_orderbooks (
     source_name TEXT NOT NULL DEFAULT 'unknown',
     collected_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS collected_orderbook_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    observed_at TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    market_slug TEXT NOT NULL,
+    bid_price REAL,
+    bid_size REAL,
+    ask_price REAL,
+    ask_size REAL,
+    last_trade_price REAL,
+    is_mock INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS discovered_markets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
+    session_id TEXT,
     source_name TEXT NOT NULL,
     market_id TEXT NOT NULL,
     market_slug TEXT NOT NULL,
@@ -143,6 +176,7 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
 CREATE TABLE IF NOT EXISTS raw_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
+    session_id TEXT,
     source_name TEXT NOT NULL,
     asset TEXT,
     snapshot_type TEXT NOT NULL,
@@ -152,6 +186,7 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
 );
 CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
+    session_id TEXT,
     strategy TEXT NOT NULL,
     mode TEXT NOT NULL,
     data_source TEXT NOT NULL,
@@ -164,6 +199,22 @@ CREATE TABLE IF NOT EXISTS runs (
     max_position_exposure REAL,
     accepted_trade_count INTEGER DEFAULT 0,
     skipped_opportunity_count INTEGER DEFAULT 0,
+    notes TEXT
+);
+CREATE TABLE IF NOT EXISTS research_sessions (
+    session_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_seconds REAL,
+    interval_seconds REAL NOT NULL,
+    cycles_requested INTEGER,
+    cycles_completed INTEGER DEFAULT 0,
+    successful_cycles INTEGER DEFAULT 0,
+    failed_cycles INTEGER DEFAULT 0,
+    assets_observed TEXT,
+    public_sources_used TEXT,
+    snapshot_count INTEGER DEFAULT 0,
+    failed_snapshot_count INTEGER DEFAULT 0,
     notes TEXT
 );
 """
@@ -188,15 +239,20 @@ class SQLiteStore:
             cols = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             if "source_name" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN source_name TEXT NOT NULL DEFAULT 'unknown'")
+        for table in ("price_snapshots", "candles", "discovered_markets", "raw_snapshots", "runs"):
+            cols = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+            if "session_id" not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
 
     def close(self) -> None:
         self.conn.close()
 
-    def log_price(self, snapshot: PriceSnapshot) -> None:
+    def log_price(self, snapshot: PriceSnapshot, session_id: str | None = None) -> None:
         self.conn.execute(
-            "INSERT INTO price_snapshots (observed_at, asset, price, source) VALUES (?, ?, ?, ?)",
+            "INSERT INTO price_snapshots (observed_at, session_id, asset, price, source) VALUES (?, ?, ?, ?, ?)",
             (
                 _iso(snapshot.timestamp),
+                session_id,
                 snapshot.asset.value,
                 snapshot.price,
                 snapshot.source,
@@ -213,15 +269,17 @@ class SQLiteStore:
         payload: dict[str, Any] | list[Any],
         status: str = "ok",
         error_message: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self.conn.execute(
             """
             INSERT INTO raw_snapshots
-                (observed_at, source_name, asset, snapshot_type, payload_json, status, error_message)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (observed_at, session_id, source_name, asset, snapshot_type, payload_json, status, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 _iso(observed_at),
+                session_id,
                 source_name,
                 asset,
                 snapshot_type,
@@ -232,16 +290,24 @@ class SQLiteStore:
         )
         self.conn.commit()
 
-    def log_candles(self, asset: str, candles: list[Candle], source: str, observed_at: datetime) -> None:
+    def log_candles(
+        self,
+        asset: str,
+        candles: list[Candle],
+        source: str,
+        observed_at: datetime,
+        session_id: str | None = None,
+    ) -> None:
         self.conn.executemany(
             """
             INSERT INTO candles
-                (observed_at, asset, candle_start, low, high, open, close, volume, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (observed_at, session_id, asset, candle_start, low, high, open, close, volume, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     _iso(observed_at),
+                    session_id,
                     asset,
                     _iso(candle.start),
                     candle.low,
@@ -262,6 +328,7 @@ class SQLiteStore:
         markets: list[Market],
         orderbooks: dict[str, OrderBook],
         source_name: str = "unknown",
+        session_id: str | None = None,
     ) -> None:
         if source_name == "unknown":
             self.conn.execute("DELETE FROM collected_markets")
@@ -296,6 +363,32 @@ class SQLiteStore:
         )
         self.conn.executemany(
             """
+            INSERT INTO collected_market_history
+                (session_id, observed_at, source_name, market_slug, market_id, title, asset, window_start,
+                 window_end, up_token_id, down_token_id, source_url, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    session_id,
+                    _iso(now),
+                    source_name,
+                    market.slug,
+                    market.market_id,
+                    market.title,
+                    market.asset.value,
+                    _iso(market.window.start),
+                    _iso(market.window.end),
+                    market.up_token_id,
+                    market.down_token_id,
+                    market.source_url,
+                    int(market.is_mock),
+                )
+                for market in markets
+            ],
+        )
+        self.conn.executemany(
+            """
             INSERT OR REPLACE INTO collected_orderbooks
                 (token_id, market_slug, bid_price, bid_size, ask_price, ask_size, last_trade_price,
                  is_mock, source_name, collected_at)
@@ -319,6 +412,32 @@ class SQLiteStore:
                 for book in (orderbooks[token_id],)
             ],
         )
+        self.conn.executemany(
+            """
+            INSERT INTO collected_orderbook_history
+                (session_id, observed_at, source_name, token_id, market_slug, bid_price, bid_size, ask_price,
+                 ask_size, last_trade_price, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    session_id,
+                    _iso(now),
+                    source_name,
+                    token_id,
+                    market.slug,
+                    book.best_bid,
+                    _size_for_price(book.bids, book.best_bid),
+                    book.best_ask,
+                    _size_for_price(book.asks, book.best_ask),
+                    book.last_trade_price,
+                    int(market.is_mock),
+                )
+                for market in markets
+                for token_id in (market.up_token_id, market.down_token_id)
+                for book in (orderbooks[token_id],)
+            ],
+        )
         self.conn.commit()
 
     def log_discovered_markets(
@@ -326,15 +445,17 @@ class SQLiteStore:
         now: datetime,
         source_name: str,
         candidates: list[DiscoveredMarket],
+        session_id: str | None = None,
     ) -> None:
         self.conn.executemany(
             """
             INSERT INTO discovered_markets
                 (observed_at, source_name, market_id, market_slug, title, asset_label, classification,
+                 session_id,
                  classification_reasons_json, token_status, orderbook_status, up_token_id, down_token_id,
                  condition_id, active, closed, accepting_orders, window_start, window_end, source_url,
                  accepted, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -345,6 +466,7 @@ class SQLiteStore:
                     candidate.title,
                     candidate.asset_label,
                     candidate.classification.value,
+                    session_id,
                     json.dumps(list(candidate.classification_reasons), sort_keys=True),
                     candidate.token_status,
                     candidate.orderbook_status,
@@ -388,15 +510,16 @@ class SQLiteStore:
         starting_balance: float,
         now: datetime,
         notes: str = "",
+        session_id: str | None = None,
     ) -> str:
         run_id = str(uuid4())
         self.conn.execute(
             """
             INSERT INTO runs
-                (run_id, strategy, mode, data_source, started_at, starting_balance, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (run_id, session_id, strategy, mode, data_source, started_at, starting_balance, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (run_id, strategy, mode, data_source, _iso(now), starting_balance, notes),
+            (run_id, session_id, strategy, mode, data_source, _iso(now), starting_balance, notes),
         )
         self.conn.commit()
         return run_id
@@ -474,6 +597,85 @@ class SQLiteStore:
     def latest_run_id(self) -> str | None:
         row = self.latest_run()
         return str(row["run_id"]) if row else None
+
+    def start_research_session(
+        self,
+        now: datetime,
+        interval_seconds: float,
+        cycles_requested: int | None,
+        notes: str = "",
+    ) -> str:
+        session_id = str(uuid4())
+        self.conn.execute(
+            """
+            INSERT INTO research_sessions
+                (session_id, started_at, interval_seconds, cycles_requested, notes)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (session_id, _iso(now), interval_seconds, cycles_requested, notes),
+        )
+        self.conn.commit()
+        return session_id
+
+    def update_research_session_progress(
+        self,
+        session_id: str,
+        *,
+        cycles_completed: int,
+        successful_cycles: int,
+        failed_cycles: int,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE research_sessions
+            SET cycles_completed = ?, successful_cycles = ?, failed_cycles = ?
+            WHERE session_id = ?
+            """,
+            (cycles_completed, successful_cycles, failed_cycles, session_id),
+        )
+        self.conn.commit()
+
+    def finish_research_session(self, session_id: str, ended_at: datetime) -> None:
+        row = self.research_session_by_id(session_id)
+        if row is None:
+            return
+        started_at = _from_iso(str(row["started_at"]))
+        raw_rows = self.raw_snapshot_rows(session_id=session_id)
+        assets = sorted({str(snapshot["asset"]) for snapshot in raw_rows if snapshot["asset"]})
+        sources = sorted({str(snapshot["source_name"]) for snapshot in raw_rows})
+        failed_snapshots = sum(1 for snapshot in raw_rows if str(snapshot["status"]) != "ok")
+        self.conn.execute(
+            """
+            UPDATE research_sessions
+            SET ended_at = ?, duration_seconds = ?, assets_observed = ?, public_sources_used = ?,
+                snapshot_count = ?, failed_snapshot_count = ?
+            WHERE session_id = ?
+            """,
+            (
+                _iso(ended_at),
+                (ended_at - started_at).total_seconds(),
+                json.dumps(assets, sort_keys=True),
+                json.dumps(sources, sort_keys=True),
+                len(raw_rows),
+                failed_snapshots,
+                session_id,
+            ),
+        )
+        self.conn.commit()
+
+    def research_session_by_id(self, session_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM research_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+
+    def latest_research_session(self) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM research_sessions ORDER BY started_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+
+    def research_session_rows(self) -> list[sqlite3.Row]:
+        return self.rows("SELECT * FROM research_sessions ORDER BY started_at, rowid")
 
     def log_opportunity(self, now: datetime, decision: OpportunityDecision, run_id: str | None = None) -> None:
         self.conn.execute(
@@ -634,6 +836,8 @@ class SQLiteStore:
         source_prefix: str | None = None,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> dict[str, PriceSnapshot]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -644,9 +848,15 @@ class SQLiteStore:
         if source_clause:
             clauses.append(source_clause)
             params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if since is not None:
             clauses.append("observed_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self.rows(
             f"""
@@ -677,6 +887,8 @@ class SQLiteStore:
         source_prefix: str | None = None,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[Candle]:
         params: list[Any] = [asset]
         clauses: list[str] = []
@@ -687,9 +899,15 @@ class SQLiteStore:
         if source_clause:
             clauses.append(source_clause)
             params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if since is not None:
             clauses.append("observed_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
         extra = f"AND {' AND '.join(clauses)}" if clauses else ""
         rows = self.rows(
             f"""
@@ -720,7 +938,34 @@ class SQLiteStore:
         mock_only: bool | None = None,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[Market]:
+        if session_id is not None or since is not None or until is not None:
+            rows = self._market_history_rows(
+                mock_only=mock_only,
+                source_filter=source_filter,
+                since=since,
+                until=until,
+                session_id=session_id,
+            )
+            return [
+                Market(
+                    market_id=str(row["market_id"]),
+                    slug=str(row["market_slug"]),
+                    title=str(row["title"]),
+                    asset=asset_enum(str(row["asset"])),
+                    window=TimingWindow(
+                        start=_from_iso(str(row["window_start"])),
+                        end=_from_iso(str(row["window_end"])),
+                    ),
+                    up_token_id=str(row["up_token_id"]),
+                    down_token_id=str(row["down_token_id"]),
+                    source_url=str(row["source_url"]),
+                    is_mock=bool(row["is_mock"]),
+                )
+                for row in rows
+            ]
         query = """
             SELECT market_id, market_slug, title, asset, window_start, window_end,
                    up_token_id, down_token_id, source_url, is_mock
@@ -765,7 +1010,36 @@ class SQLiteStore:
         token_id: str,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> OrderBook | None:
+        if session_id is not None or since is not None or until is not None:
+            clauses = ["token_id = ?"]
+            params: list[Any] = [token_id]
+            source_clause, source_params = _source_sql("source_name", source_filter)
+            if source_clause:
+                clauses.append(source_clause)
+                params.extend(source_params)
+            if session_id is not None:
+                clauses.append("session_id = ?")
+                params.append(session_id)
+            if since is not None:
+                clauses.append("observed_at >= ?")
+                params.append(_iso(since))
+            if until is not None:
+                clauses.append("observed_at <= ?")
+                params.append(_iso(until))
+            row = self.conn.execute(
+                f"""
+                SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price
+                FROM collected_orderbook_history
+                WHERE {' AND '.join(clauses)}
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            return _orderbook_from_row(row)
         clauses = ["token_id = ?"]
         params: list[Any] = [token_id]
         source_clause, source_params = _source_sql("source_name", source_filter)
@@ -783,25 +1057,14 @@ class SQLiteStore:
             """,
             tuple(params),
         ).fetchone()
-        if row is None:
-            return None
-        bids = ()
-        asks = ()
-        if row["bid_price"] is not None and row["bid_size"] is not None:
-            bids = (OrderLevel(price=float(row["bid_price"]), size=float(row["bid_size"])),)
-        if row["ask_price"] is not None and row["ask_size"] is not None:
-            asks = (OrderLevel(price=float(row["ask_price"]), size=float(row["ask_size"])),)
-        return OrderBook(
-            token_id=str(row["token_id"]),
-            bids=bids,
-            asks=asks,
-            last_trade_price=float(row["last_trade_price"]) if row["last_trade_price"] is not None else None,
-        )
+        return _orderbook_from_row(row)
 
     def raw_snapshot_rows(
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[sqlite3.Row]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -809,9 +1072,15 @@ class SQLiteStore:
         if source_clause:
             clauses.append(source_clause)
             params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if since is not None:
             clauses.append("observed_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.rows(f"SELECT * FROM raw_snapshots {where} ORDER BY observed_at, id", tuple(params))
 
@@ -819,6 +1088,8 @@ class SQLiteStore:
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[sqlite3.Row]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -826,9 +1097,15 @@ class SQLiteStore:
         if source_clause:
             clauses.append(source_clause)
             params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if since is not None:
             clauses.append("observed_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.rows(
             f"SELECT * FROM discovered_markets {where} ORDER BY observed_at, market_slug, id",
@@ -839,8 +1116,10 @@ class SQLiteStore:
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
-        rows = self.raw_snapshot_rows(source_filter=source_filter, since=since)
+        rows = self.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         first = rows[0]["observed_at"] if rows else "n/a"
         latest = rows[-1]["observed_at"] if rows else "n/a"
         filtered_ids = [int(row["id"]) for row in rows]
@@ -872,11 +1151,12 @@ class SQLiteStore:
                 id_params,
             )
         ]
-        market_rows = self._visible_market_rows(source_filter=source_filter, since=since)
-        quality = self.data_quality_metrics(source_filter=source_filter, since=since)
+        market_rows = self._visible_market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        quality = self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)
         actual_sources = {str(row["source_name"]) for row in rows}
         return {
             "source_filter": source_filter or "all",
+            "session_id": session_id or "none",
             "total_snapshots": len(rows),
             "exchange_price_snapshots": type_counts.get("exchange_price", 0),
             "market_snapshots": type_counts.get("market_metadata", 0),
@@ -900,19 +1180,21 @@ class SQLiteStore:
         wide_spread: float = 0.10,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
-        raw_rows = self.raw_snapshot_rows(source_filter=source_filter, since=since)
+        raw_rows = self.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         failed = sum(1 for row in raw_rows if row["status"] != "ok")
         stale = 0
         for row in raw_rows:
             observed = _from_iso(str(row["observed_at"]))
             if (now - observed).total_seconds() > stale_seconds:
                 stale += 1
-        latest_prices = self.latest_prices(source_filter=source_filter, since=since)
+        latest_prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
         missing_prices = sum(1 for asset in ("BTC", "ETH") if asset not in latest_prices)
-        markets = self.collected_markets(source_filter=source_filter, since=since)
-        discovered_rows = self.discovered_market_rows(source_filter=source_filter, since=since)
+        markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        discovered_rows = self.discovered_market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         missing_orderbooks = 0
         wide_spreads = 0
         low_liquidity = 0
@@ -925,7 +1207,7 @@ class SQLiteStore:
             missing_orderbooks = sum(1 for row in directional if str(row["orderbook_status"]) != "FOUND")
         for market in markets:
             for token_id in (market.up_token_id, market.down_token_id):
-                book = self.collected_orderbook(token_id, source_filter=source_filter, since=since)
+                book = self.collected_orderbook(token_id, source_filter=source_filter, since=since, until=until, session_id=session_id)
                 if book is None:
                     if source_filter != "public":
                         missing_orderbooks += 1
@@ -977,8 +1259,10 @@ class SQLiteStore:
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        rows = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
+        rows = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         if rows:
             output: list[dict[str, Any]] = []
             for row in rows:
@@ -1003,11 +1287,11 @@ class SQLiteStore:
                     }
                 )
             return output
-        rows = self._market_rows(source_filter=source_filter, since=since)
+        rows = self._market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         output: list[dict[str, Any]] = []
         for row in rows:
-            up_book = self.collected_orderbook(str(row["up_token_id"]), source_filter=source_filter, since=since)
-            down_book = self.collected_orderbook(str(row["down_token_id"]), source_filter=source_filter, since=since)
+            up_book = self.collected_orderbook(str(row["up_token_id"]), source_filter=source_filter, since=since, until=until, session_id=session_id)
+            down_book = self.collected_orderbook(str(row["down_token_id"]), source_filter=source_filter, since=since, until=until, session_id=session_id)
             output.append(
                 {
                     "market_id": str(row["market_id"]),
@@ -1030,13 +1314,19 @@ class SQLiteStore:
             )
         return output
 
-    def readiness(self, source_filter: str | None = "public", since: datetime | None = None) -> dict[str, Any]:
-        summary = self.dataset_summary(source_filter=source_filter, since=since)
-        prices = self.latest_prices(source_filter=source_filter, since=since)
-        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
-        markets = self.collected_markets(source_filter=source_filter, since=since)
+    def readiness(
+        self,
+        source_filter: str | None = "public",
+        since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        summary = self.dataset_summary(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
         orderbooks = [
-            self.collected_orderbook(token_id, source_filter=source_filter, since=since)
+            self.collected_orderbook(token_id, source_filter=source_filter, since=since, until=until, session_id=session_id)
             for market in markets
             for token_id in (market.up_token_id, market.down_token_id)
         ]
@@ -1074,7 +1364,7 @@ class SQLiteStore:
             verdict = "MISSING_ORDERBOOKS"
         elif not (market_assets & price_assets):
             verdict = "INSUFFICIENT_OVERLAP" if source_filter == "public" else "INSUFFICIENT_PUBLIC_DATA"
-        elif len(self.raw_snapshot_rows(source_filter=source_filter, since=since)) < 3:
+        elif len(self.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)) < 3:
             verdict = "INSUFFICIENT_SNAPSHOTS" if source_filter == "public" else "INSUFFICIENT_PUBLIC_DATA"
         return {
             "verdict": verdict,
@@ -1092,8 +1382,8 @@ class SQLiteStore:
             "market_count": len(directional or markets),
             "orderbook_count": sum(1 for book in orderbooks if book is not None),
             "exchange_price_count": summary["exchange_price_snapshots"],
-            "wide_spreads": self.data_quality_metrics(source_filter=source_filter, since=since)["wide_spreads"],
-            "missing_orderbooks": self.data_quality_metrics(source_filter=source_filter, since=since)["missing_orderbooks"],
+            "wide_spreads": self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)["wide_spreads"],
+            "missing_orderbooks": self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)["missing_orderbooks"],
             "token_count": len(token_ready),
             "timestamps_overlap": bool(market_assets & price_assets),
             "minimum_snapshot_count_met": summary["total_snapshots"] >= 3,
@@ -1103,16 +1393,20 @@ class SQLiteStore:
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[sqlite3.Row]:
-        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
+        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         if discovered:
             return discovered
-        return self._market_rows(source_filter=source_filter, since=since)
+        return self._market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
 
     def _discovered_market_aggregate_rows(
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[sqlite3.Row]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -1120,9 +1414,15 @@ class SQLiteStore:
         if source_clause:
             clauses.append(source_clause)
             params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if since is not None:
             clauses.append("observed_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.rows(
             f"""
@@ -1147,7 +1447,17 @@ class SQLiteStore:
         self,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ) -> list[sqlite3.Row]:
+        if session_id is not None or since is not None or until is not None:
+            return self._market_history_rows(
+                mock_only=None,
+                source_filter=source_filter,
+                since=since,
+                until=until,
+                session_id=session_id,
+            )
         clauses: list[str] = []
         params: list[Any] = []
         source_clause, source_params = _source_sql("source_name", source_filter)
@@ -1157,6 +1467,9 @@ class SQLiteStore:
         if since is not None:
             clauses.append("collected_at >= ?")
             params.append(_iso(since))
+        if until is not None:
+            clauses.append("collected_at <= ?")
+            params.append(_iso(until))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.rows(
             f"""
@@ -1167,6 +1480,51 @@ class SQLiteStore:
             {where}
             GROUP BY market_slug
             ORDER BY latest_seen, market_slug
+            """,
+            tuple(params),
+        )
+
+    def _market_history_rows(
+        self,
+        mock_only: bool | None,
+        source_filter: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        session_id: str | None,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if mock_only is not None:
+            clauses.append("is_mock = ?")
+            params.append(1 if mock_only else 0)
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.rows(
+            f"""
+            SELECT h.market_id, h.market_slug, h.title, h.asset, h.window_start, h.window_end,
+                   h.up_token_id, h.down_token_id, h.source_url, h.is_mock, h.source_name,
+                   agg.first_seen, agg.latest_seen
+            FROM collected_market_history h
+            JOIN (
+                SELECT market_slug, MIN(observed_at) AS first_seen, MAX(observed_at) AS latest_seen, MAX(id) AS latest_id
+                FROM collected_market_history
+                {where}
+                GROUP BY market_slug
+            ) agg
+                ON agg.latest_id = h.id
+            ORDER BY agg.latest_seen, h.market_slug
             """,
             tuple(params),
         )
@@ -1182,9 +1540,12 @@ class SQLiteStore:
             "price_snapshots",
             "candles",
             "collected_markets",
+            "collected_market_history",
             "collected_orderbooks",
+            "collected_orderbook_history",
             "discovered_markets",
             "raw_snapshots",
+            "research_sessions",
             "app_state",
         ):
             self.conn.execute(f"DELETE FROM {table}")
@@ -1218,6 +1579,23 @@ def _size_for_price(levels: tuple[OrderLevel, ...], price: float | None) -> floa
         if level.price == price:
             return level.size
     return None
+
+
+def _orderbook_from_row(row: sqlite3.Row | None) -> OrderBook | None:
+    if row is None:
+        return None
+    bids = ()
+    asks = ()
+    if row["bid_price"] is not None and row["bid_size"] is not None:
+        bids = (OrderLevel(price=float(row["bid_price"]), size=float(row["bid_size"])),)
+    if row["ask_price"] is not None and row["ask_size"] is not None:
+        asks = (OrderLevel(price=float(row["ask_price"]), size=float(row["ask_size"])),)
+    return OrderBook(
+        token_id=str(row["token_id"]),
+        bids=bids,
+        asks=asks,
+        last_trade_price=float(row["last_trade_price"]) if row["last_trade_price"] is not None else None,
+    )
 
 
 def _source_sql(column: str, source_filter: str | None) -> tuple[str, list[Any]]:

@@ -13,9 +13,10 @@ def build_diagnostics(
     run_id: str | None = None,
     strategy: str | None = None,
     source_filter: str | None = None,
+    session_id: str | None = None,
 ) -> str:
-    run_rows = _matching_run_rows(store, run_id=run_id, strategy=strategy, source_filter=source_filter)
-    scope = _scope_label(run_rows, run_id=run_id, strategy=strategy, source_filter=source_filter)
+    run_rows = _matching_run_rows(store, run_id=run_id, strategy=strategy, source_filter=source_filter, session_id=session_id)
+    scope = _scope_label(run_rows, run_id=run_id, strategy=strategy, source_filter=source_filter, session_id=session_id)
     lines = ["Strategy diagnostics", f"Scope: {scope}"]
     if not run_rows:
         lines.append("No matching runs found.")
@@ -156,6 +157,7 @@ def _matching_run_rows(
     run_id: str | None = None,
     strategy: str | None = None,
     source_filter: str | None = None,
+    session_id: str | None = None,
 ) -> list[Any]:
     if run_id:
         row = store.run_by_id(run_id)
@@ -168,6 +170,9 @@ def _matching_run_rows(
     if source_filter:
         clauses.append("data_source = ?")
         params.append(source_filter)
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
     if clauses:
         where = " WHERE " + " AND ".join(clauses)
         return store.rows(f"SELECT * FROM runs{where} ORDER BY started_at, rowid", tuple(params))
@@ -175,7 +180,7 @@ def _matching_run_rows(
     return [latest] if latest else []
 
 
-def _scope_label(run_rows: list[Any], run_id: str | None, strategy: str | None, source_filter: str | None) -> str:
+def _scope_label(run_rows: list[Any], run_id: str | None, strategy: str | None, source_filter: str | None, session_id: str | None) -> str:
     if run_id:
         return f"run_id={run_id}"
     parts = []
@@ -183,6 +188,8 @@ def _scope_label(run_rows: list[Any], run_id: str | None, strategy: str | None, 
         parts.append(f"strategy={strategy}")
     if source_filter:
         parts.append(f"source={source_filter}")
+    if session_id:
+        parts.append(f"session_id={session_id}")
     if parts:
         return "; ".join(parts)
     if run_rows:

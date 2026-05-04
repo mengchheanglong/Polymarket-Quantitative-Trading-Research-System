@@ -9,12 +9,15 @@ def build_dataset_summary(
     store: SQLiteStore,
     source_filter: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    session_id: str | None = None,
 ) -> str:
-    summary = store.dataset_summary(source_filter=source_filter, since=since)
+    summary = store.dataset_summary(source_filter=source_filter, since=since, until=until, session_id=session_id)
     return "\n".join(
         [
             "Dataset summary",
             f"Source filter: {summary['source_filter']}",
+            f"Session ID: {summary['session_id']}",
             f"Total snapshots: {summary['total_snapshots']}",
             f"Exchange price snapshots: {summary['exchange_price_snapshots']}",
             f"Polymarket market snapshots: {summary['market_snapshots']}",

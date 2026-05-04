@@ -71,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     replay_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     replay_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
+    replay_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
+    replay_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     replay_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
     backtest_parser.add_argument(
@@ -81,17 +83,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     backtest_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     backtest_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
+    backtest_parser.add_argument("--until", help="Only summarize snapshots at or before this UTC ISO timestamp.")
+    backtest_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     subcommands.add_parser("runs", help="List experiment runs")
     compare_parser = subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
     compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    compare_parser.add_argument("--session-id", help="Filter runs for a research session.")
     diagnostics_parser = subcommands.add_parser("diagnostics", help="Explain accepted/skipped paper opportunities")
     diagnostics_parser.add_argument("--run-id", help="Inspect a specific run.")
     diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Filter by strategy.")
     diagnostics_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    diagnostics_parser.add_argument("--session-id", help="Filter runs for a research session.")
     sweep_parser = subcommands.add_parser("sweep", help="Run a paper-only threshold sweep on stored snapshots")
     sweep_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), required=True)
     sweep_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     sweep_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
+    sweep_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
+    sweep_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     reset_parser = subcommands.add_parser("reset", help="Delete research data safely")
     reset_parser.add_argument("--paper-results", action="store_true", help="Delete paper runs, trades, opportunities, and equity only.")
     reset_parser.add_argument("--all", action="store_true", help="Delete paper results and collected snapshot data.")
@@ -99,15 +107,28 @@ def main(argv: list[str] | None = None) -> int:
     observe_parser.add_argument("--duration-minutes", type=float, default=None, help="Maximum observe duration.")
     observe_parser.add_argument("--interval-seconds", type=float, default=15.0, help="Seconds between cycles.")
     observe_parser.add_argument("--cycles", type=int, default=None, help="Maximum cycles, useful for tests.")
+    subcommands.add_parser("sessions", help="List public-data research sessions")
+    session_report_parser = subcommands.add_parser("session-report", help="Summarize a research observation session")
+    session_report_parser.add_argument("--session-id", help="Show a specific session.")
+    session_report_parser.add_argument("--latest", action="store_true", help="Show the latest session.")
+    research_report_parser = subcommands.add_parser("research-report", help="Summarize how to analyze a research session")
+    research_report_parser.add_argument("--session-id", help="Analyze a specific session.")
+    research_report_parser.add_argument("--latest", action="store_true", help="Analyze the latest session.")
     dataset_parser = subcommands.add_parser("dataset", help="Summarize stored public/demo snapshots")
     dataset_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     dataset_parser.add_argument("--since", help="Only summarize snapshots at or after this UTC ISO timestamp.")
+    dataset_parser.add_argument("--until", help="Only summarize snapshots at or before this UTC ISO timestamp.")
+    dataset_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     readiness_parser = subcommands.add_parser("readiness", help="Check whether stored data is replay-ready")
     readiness_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     readiness_parser.add_argument("--since", help="Only inspect snapshots at or after this UTC ISO timestamp.")
+    readiness_parser.add_argument("--until", help="Only inspect snapshots at or before this UTC ISO timestamp.")
+    readiness_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     markets_parser = subcommands.add_parser("markets", help="Audit discovered Polymarket markets")
     markets_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     markets_parser.add_argument("--since", help="Only inspect markets collected at or after this UTC ISO timestamp.")
+    markets_parser.add_argument("--until", help="Only inspect markets collected at or before this UTC ISO timestamp.")
+    markets_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     discover_parser = subcommands.add_parser("discover-markets", help="Probe public Polymarket market discovery")
     discover_parser.add_argument("--asset", choices=("BTC", "ETH", "all"), default="all")
     export_parser = subcommands.add_parser("export", help="Export local research data")
@@ -115,6 +136,8 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--out", default="exports")
     export_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     export_parser.add_argument("--since", help="Only export raw snapshots at or after this UTC ISO timestamp.")
+    export_parser.add_argument("--until", help="Only export raw snapshots at or before this UTC ISO timestamp.")
+    export_parser.add_argument("--session-id", help="Export only data tied to a research session when possible.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -151,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
             return reset(config, args)
         if args.command == "observe":
             return observe(config, args)
+        if args.command == "sessions":
+            return sessions(config)
+        if args.command == "session-report":
+            return session_report(config, args)
+        if args.command == "research-report":
+            return research_report(config, args)
         if args.command == "dataset":
             return dataset(config, args)
         if args.command == "readiness":
@@ -169,10 +198,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"collect", "run-paper"}:
             print("Try demo mode: python -m src.main collect --demo", file=sys.stderr)
         return 1
+    except ValueError as exc:
+        print(f"Input error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
-def collect(config: AgentConfig) -> int:
+def collect(config: AgentConfig, session_id: str | None = None) -> int:
     now = datetime.now(timezone.utc)
     store = SQLiteStore(config.database_path)
     try:
@@ -186,7 +218,7 @@ def collect(config: AgentConfig) -> int:
                 for token_id in (market.up_token_id, market.down_token_id)
             }
             for snapshot in prices:
-                store.log_price(snapshot)
+                store.log_price(snapshot, session_id=session_id)
                 store.log_raw_snapshot(
                     now,
                     snapshot.source,
@@ -194,15 +226,17 @@ def collect(config: AgentConfig) -> int:
                     "exchange_price",
                     {"price": snapshot.price, "source": snapshot.source},
                     status="ok",
+                    session_id=session_id,
                 )
                 store.log_candles(
                     asset=snapshot.asset.value,
                     candles=demo.recent_candles(snapshot.asset, now=now),
                     source=snapshot.source,
                     observed_at=now,
+                    session_id=session_id,
                 )
-            store.replace_collected_market_data(now, markets, orderbooks, source_name="mock:demo")
-            _log_market_raw_snapshots(store, now, "mock:demo", markets, orderbooks, "ok")
+            store.replace_collected_market_data(now, markets, orderbooks, source_name="mock:demo", session_id=session_id)
+            _log_market_raw_snapshots(store, now, session_id, "mock:demo", markets, orderbooks, "ok")
             for settlement in demo.settlement_prices(now=now):
                 store.log_raw_snapshot(
                     settlement.timestamp,
@@ -211,6 +245,7 @@ def collect(config: AgentConfig) -> int:
                     "settlement_price",
                     {"price": settlement.price, "source": settlement.source},
                     status="ok",
+                    session_id=session_id,
                 )
             store.set_state("last_collection_mode", "demo", now)
             print("Collected deterministic demo dataset.")
@@ -236,10 +271,11 @@ def collect(config: AgentConfig) -> int:
                 {},
                 status="failed",
                 error_message=str(exc),
+                session_id=session_id,
             )
             raise HttpError(f"public exchange collection failed: {exc}") from exc
         for snapshot in prices:
-            store.log_price(snapshot)
+            store.log_price(snapshot, session_id=session_id)
             store.log_raw_snapshot(
                 now,
                 snapshot.source,
@@ -247,6 +283,7 @@ def collect(config: AgentConfig) -> int:
                 "exchange_price",
                 {"price": snapshot.price, "source": snapshot.source},
                 status="ok",
+                session_id=session_id,
             )
             try:
                 candles = exchange.recent_candles(snapshot.asset, granularity=60)
@@ -259,6 +296,7 @@ def collect(config: AgentConfig) -> int:
                     {},
                     status="failed",
                     error_message=str(exc),
+                    session_id=session_id,
                 )
                 raise HttpError(f"public exchange candle collection failed: {exc}") from exc
             store.log_candles(
@@ -266,6 +304,7 @@ def collect(config: AgentConfig) -> int:
                 candles=candles,
                 source=snapshot.source,
                 observed_at=now,
+                session_id=session_id,
             )
             print(f"{snapshot.asset.value} {snapshot.price:.2f} from {snapshot.source}")
 
@@ -284,9 +323,10 @@ def collect(config: AgentConfig) -> int:
                 {},
                 status="failed",
                 error_message=str(exc),
+                session_id=session_id,
             )
             raise HttpError(f"public Polymarket collection failed: {exc}") from exc
-        store.log_discovered_markets(now, "polymarket-public", candidates)
+        store.log_discovered_markets(now, "polymarket-public", candidates, session_id=session_id)
         accepted_markets = [
             market
             for candidate in candidates
@@ -306,18 +346,19 @@ def collect(config: AgentConfig) -> int:
             for token_id in (market.up_token_id, market.down_token_id)
             if token_id in orderbooks
         }
-        _log_discovery_raw_snapshots(store, now, "polymarket-public", candidates, complete_orderbooks)
+        _log_discovery_raw_snapshots(store, now, session_id, "polymarket-public", candidates, complete_orderbooks)
         store.set_state("last_collection_mode", "public", now)
         if not accepted_markets:
             print("No active short-duration BTC/ETH UP-DOWN markets discovered from public endpoints.")
             print("Use collect --demo or USE_MOCK_DATA=true for offline demo data.")
-            store.replace_collected_market_data(now, [], {}, source_name="polymarket-public")
+            store.replace_collected_market_data(now, [], {}, source_name="polymarket-public", session_id=session_id)
         else:
             store.replace_collected_market_data(
                 now,
                 complete_markets,
                 complete_orderbooks,
                 source_name="polymarket-public",
+                session_id=session_id,
             )
             print(f"Discovered {len(accepted_markets)} directional public Polymarket markets.")
             print(f"Stored complete orderbooks for {len(complete_markets)} markets.")
@@ -332,19 +373,174 @@ def observe(config: AgentConfig, args) -> int:
     cycles = _observe_cycles(args.duration_minutes, args.interval_seconds, args.cycles)
     successes = 0
     failures = 0
-    for index in range(cycles):
-        print(f"Observe cycle {index + 1}/{cycles}")
-        try:
-            collect(config)
-            successes += 1
-            print(f"Observe cycle {index + 1} complete.")
-        except HttpError as exc:
-            failures += 1
-            print(f"Observe cycle {index + 1} failed: {exc}", file=sys.stderr)
-            print("Continuing observe loop. Use collect --demo for offline data.", file=sys.stderr)
-        if index < cycles - 1 and args.interval_seconds > 0:
-            time.sleep(args.interval_seconds)
+    store = SQLiteStore(config.database_path)
+    started_at = datetime.now(timezone.utc)
+    session_id = store.start_research_session(
+        started_at,
+        interval_seconds=args.interval_seconds,
+        cycles_requested=args.cycles if args.cycles is not None else cycles,
+        notes=f"duration_minutes={args.duration_minutes or 'none'}; interval_seconds={args.interval_seconds}",
+    )
+    print(f"Observe session started: {session_id}")
+    interrupted = False
+    try:
+        for index in range(cycles):
+            print(f"Observe cycle {index + 1}/{cycles}")
+            try:
+                collect(config, session_id=session_id)
+                successes += 1
+                snapshot_count = len(store.raw_snapshot_rows(session_id=session_id))
+                print(f"Observe cycle {index + 1} complete. Session snapshots: {snapshot_count}; failures: {failures}.")
+            except HttpError as exc:
+                failures += 1
+                print(f"Observe cycle {index + 1} failed: {exc}", file=sys.stderr)
+                print("Continuing observe loop. Use collect --demo for offline data.", file=sys.stderr)
+            store.update_research_session_progress(
+                session_id,
+                cycles_completed=index + 1,
+                successful_cycles=successes,
+                failed_cycles=failures,
+            )
+            if index < cycles - 1 and args.interval_seconds > 0:
+                time.sleep(args.interval_seconds)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nObserve interrupted. Finalizing partial session...")
+    finally:
+        ended_at = datetime.now(timezone.utc)
+        store.finish_research_session(session_id, ended_at)
+        session = store.research_session_by_id(session_id)
+        store.close()
+
     print(f"Observe complete. Successful cycles: {successes}; failed cycles: {failures}.")
+    if session is not None:
+        print(
+            f"Session summary: session_id={session_id} | cycles_completed={session['cycles_completed']} | "
+            f"snapshots={session['snapshot_count']} | failed_snapshots={session['failed_snapshot_count']}"
+        )
+    if interrupted:
+        print(f"Analyze the partial session with: python -m src.main session-report --session-id {session_id}")
+        return 0
+    print(f"Analyze this session with: python -m src.main session-report --session-id {session_id}")
+    return 0
+
+
+def sessions(config: AgentConfig) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        rows = store.research_session_rows()
+        print("Research sessions")
+        if not rows:
+            print("No sessions found.")
+            return 0
+        for row in rows:
+            print(
+                " | ".join(
+                    [
+                        str(row["session_id"]),
+                        f"started={row['started_at']}",
+                        f"ended={row['ended_at'] or 'OPEN'}",
+                        f"duration_seconds={row['duration_seconds'] or 0}",
+                        f"cycles={row['cycles_completed']}/{row['cycles_requested'] or row['cycles_completed']}",
+                        f"successful={row['successful_cycles']}",
+                        f"failed={row['failed_cycles']}",
+                        f"snapshots={row['snapshot_count']}",
+                        f"failed_snapshots={row['failed_snapshot_count']}",
+                    ]
+                )
+            )
+    finally:
+        store.close()
+    return 0
+
+
+def session_report(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        session = _session_row(store, args)
+        if session is None:
+            print("No matching session found.")
+            return 1
+        session_id, since, until = _session_bounds(store, str(session["session_id"]))
+        summary = store.dataset_summary(source_filter="public", since=since, until=until, session_id=session_id)
+        quality = store.data_quality_metrics(source_filter="public", since=since, until=until, session_id=session_id)
+        readiness_result = store.readiness(source_filter="public", since=since, until=until, session_id=session_id)
+        markets = store.market_audit_rows(source_filter="public", since=since, until=until, session_id=session_id)
+        found = sum(1 for row in markets if row["accepted"])
+        orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
+        assets = summary["assets_seen"]
+        print("Research session report")
+        print(f"Session ID: {session_id}")
+        print(f"Started: {session['started_at']}")
+        print(f"Ended: {session['ended_at'] or 'OPEN'}")
+        print(f"Duration seconds: {session['duration_seconds'] or 0}")
+        print(f"Interval seconds: {session['interval_seconds']}")
+        print(f"Cycles completed: {session['cycles_completed']}")
+        print(f"Successful cycles: {session['successful_cycles']}")
+        print(f"Failed cycles: {session['failed_cycles']}")
+        print(f"Assets observed: {_format_sources(assets)}")
+        print(f"Snapshot count: {summary['total_snapshots']}")
+        print(f"Failed snapshot count: {summary['failed_snapshots']}")
+        print(f"Public sources used: {_format_sources(summary['source_coverage'].keys())}")
+        print(f"BTC/ETH markets found: {found}")
+        print(f"Orderbooks captured: {orderbooks}")
+        print(f"Readiness verdict: {readiness_result['verdict']}")
+        print(f"Data quality: failed={quality['failed_collection_attempts']}, stale={quality['stale_snapshots']}, missing_orderbooks={quality['missing_orderbooks']}, missing_prices={quality['missing_prices']}")
+        print(f"Market discovery summary: accepted={found}, rejected={len(markets) - found}")
+        print(f"Recommended next command: {_recommended_next_command(readiness_result['verdict'], session_id)}")
+    finally:
+        store.close()
+    return 0
+
+
+def research_report(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        session = _session_row(store, args)
+        if session is None:
+            print("No matching session found.")
+            return 1
+        session_id, since, until = _session_bounds(store, str(session["session_id"]))
+        readiness_result = store.readiness(source_filter="public", since=since, until=until, session_id=session_id)
+        run_rows = store.rows(
+            """
+            SELECT run_id, strategy, mode, realized_pnl, accepted_trade_count, skipped_opportunity_count
+            FROM runs
+            WHERE session_id = ?
+            ORDER BY started_at, rowid
+            """,
+            (session_id,),
+        )
+        print("Research report")
+        print(f"Session ID: {session_id}")
+        print(f"Readiness verdict: {readiness_result['verdict']}")
+        if not run_rows:
+            print("No stored replay runs for this session yet.")
+            print(f"Next: python -m src.main replay --strategy momentum --source public --session-id {session_id}")
+            print(f"Next: python -m src.main replay --strategy pair-cost --source public --session-id {session_id}")
+            print(f"Next: python -m src.main diagnostics --source public --session-id {session_id}")
+            print(f"Next: python -m src.main sweep --strategy momentum --source public --session-id {session_id}")
+            print(f"Next: python -m src.main sweep --strategy pair-cost --source public --session-id {session_id}")
+            print(f"Next: python -m src.main backtest-report --source public --session-id {session_id}")
+            return 0
+        print("Stored session runs:")
+        for row in run_rows:
+            print(
+                " | ".join(
+                    [
+                        str(row["run_id"]),
+                        f"strategy={row['strategy']}",
+                        f"mode={row['mode']}",
+                        f"realized_pnl={_fmt_money(row['realized_pnl'])}",
+                        f"accepted={row['accepted_trade_count']}",
+                        f"skipped={row['skipped_opportunity_count']}",
+                    ]
+                )
+            )
+        print(build_strategy_comparison(store, source_filter="public", session_id=session_id))
+        print(build_diagnostics(store, strategy=None, source_filter="public", session_id=session_id))
+    finally:
+        store.close()
     return 0
 
 
@@ -437,11 +633,13 @@ def replay(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         source_filter = _clean_source_filter(getattr(args, "source", None))
-        since = _parse_since(getattr(args, "since", None))
+        session_id, since, until = _resolved_time_filters(store, args)
         outcome = _simulate_replay(
             config,
             source_filter=source_filter,
             since=since,
+            until=until,
+            session_id=session_id,
             now=now,
             data_store=store,
             result_store=store,
@@ -467,6 +665,7 @@ def replay(config: AgentConfig, args) -> int:
 def backtest_report(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(store, args)
         strategy = store.get_state("last_replay_strategy") or config.strategy
         print(
             build_backtest_report(
@@ -474,7 +673,9 @@ def backtest_report(config: AgentConfig, args) -> int:
                 config.starting_balance,
                 strategy,
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
-                since=_parse_since(getattr(args, "since", None)),
+                since=since,
+                until=until,
+                session_id=session_id,
             ).as_text()
         )
     finally:
@@ -514,7 +715,13 @@ def runs(config: AgentConfig) -> int:
 def compare(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
-        print(build_strategy_comparison(store, source_filter=_clean_source_filter(getattr(args, "source", None))))
+        print(
+            build_strategy_comparison(
+                store,
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+                session_id=getattr(args, "session_id", None),
+            )
+        )
     finally:
         store.close()
     return 0
@@ -529,6 +736,7 @@ def diagnostics(config: AgentConfig, args) -> int:
                 run_id=getattr(args, "run_id", None),
                 strategy=getattr(args, "strategy", None),
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
+                session_id=getattr(args, "session_id", None),
             )
         )
     finally:
@@ -538,10 +746,10 @@ def diagnostics(config: AgentConfig, args) -> int:
 
 def sweep(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None))
-    since = _parse_since(getattr(args, "since", None))
     strategy = getattr(args, "strategy")
     data_store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(data_store, args)
         rows: list[SweepRow] = []
         for override in _sweep_configs(config, strategy):
             with tempfile.TemporaryDirectory(prefix="paper-sweep-") as temp_dir:
@@ -551,6 +759,8 @@ def sweep(config: AgentConfig, args) -> int:
                         override,
                         source_filter=source_filter,
                         since=since,
+                        until=until,
+                        session_id=session_id,
                         now=datetime.now(timezone.utc),
                         data_store=data_store,
                         result_store=scratch,
@@ -601,11 +811,14 @@ def reset(config: AgentConfig, args) -> int:
 def dataset(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(store, args)
         print(
             build_dataset_summary(
                 store,
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
-                since=_parse_since(getattr(args, "since", None)),
+                since=since,
+                until=until,
+                session_id=session_id,
             )
         )
     finally:
@@ -616,11 +829,14 @@ def dataset(config: AgentConfig, args) -> int:
 def export_data(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(store, args)
         paths = export_csv(
             store,
             args.out,
             source_filter=_clean_source_filter(getattr(args, "source", None)),
-            since=_parse_since(getattr(args, "since", None)),
+            since=since,
+            until=until,
+            session_id=session_id,
         )
         print("Export complete.")
         for path in paths:
@@ -634,7 +850,13 @@ def readiness(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         source_filter = _clean_source_filter(getattr(args, "source", None))
-        result = store.readiness(source_filter=source_filter or "all", since=_parse_since(getattr(args, "since", None)))
+        session_id, since, until = _resolved_time_filters(store, args)
+        result = store.readiness(
+            source_filter=source_filter or "all",
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
         print("Dataset readiness")
         print(f"Verdict: {result['verdict']}")
         print(f"Source filter: {result['source_filter']}")
@@ -662,9 +884,12 @@ def readiness(config: AgentConfig, args) -> int:
 def market_audit(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
+        session_id, since, until = _resolved_time_filters(store, args)
         rows = store.market_audit_rows(
             source_filter=_clean_source_filter(getattr(args, "source", None)),
-            since=_parse_since(getattr(args, "since", None)),
+            since=since,
+            until=until,
+            session_id=session_id,
         )
         print("Polymarket market discovery audit")
         if not rows:
@@ -803,6 +1028,8 @@ def _simulate_replay(
     *,
     source_filter: str | None,
     since: datetime | None,
+    until: datetime | None,
+    session_id: str | None,
     now: datetime,
     data_store: SQLiteStore,
     result_store: SQLiteStore,
@@ -813,6 +1040,8 @@ def _simulate_replay(
         data_store,
         source_filter=source_filter,
         since=since,
+        until=until,
+        session_id=session_id,
     )
     if not current_prices:
         return {
@@ -864,7 +1093,11 @@ def _simulate_replay(
         data_source=source_filter or "all",
         starting_balance=config.starting_balance,
         now=now,
-        notes=f"{_config_notes(config)}; source_filter={source_filter or 'all'}; since={since_label or 'none'}",
+        notes=(
+            f"{_config_notes(config)}; source_filter={source_filter or 'all'}; "
+            f"since={since_label or 'none'}; until={until.isoformat() if until else 'none'}"
+        ),
+        session_id=session_id,
     )
     engine = PaperTradingEngine(config, result_store, run_id=run_id)
     engine.record_equity(now)
@@ -954,24 +1187,26 @@ def _load_replay_context(
     store: SQLiteStore,
     source_filter: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    session_id: str | None = None,
 ):
     if source_filter == "demo":
-        current_prices = store.latest_prices(source_prefix="mock:demo:spot:", source_filter="demo", since=since)
+        current_prices = store.latest_prices(source_prefix="mock:demo:spot:", source_filter="demo", since=since, until=until, session_id=session_id)
         candle_prefix = "mock:demo:spot:"
     elif source_filter == "public":
-        current_prices = store.latest_prices(source_filter="public", since=since)
+        current_prices = store.latest_prices(source_filter="public", since=since, until=until, session_id=session_id)
         candle_prefix = None
     else:
-        current_prices = store.latest_prices(source_filter=source_filter, since=since)
+        current_prices = store.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
         candle_prefix = None
-    markets = store.collected_markets(source_filter=source_filter, since=since)
-    settlement_prices = _stored_settlement_prices(store, source_filter=source_filter, since=since)
-    actual_sources = [str(row["source_name"]) for row in store.raw_snapshot_rows(source_filter=source_filter, since=since)]
+    markets = store.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
+    settlement_prices = _stored_settlement_prices(store, source_filter=source_filter, since=since, until=until, session_id=session_id)
+    actual_sources = [str(row["source_name"]) for row in store.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)]
     return (
         current_prices,
-        _StoredCandleSource(store, candle_prefix, source_filter=source_filter, since=since),
+        _StoredCandleSource(store, candle_prefix, source_filter=source_filter, since=since, until=until, session_id=session_id),
         markets,
-        _StoredOrderBookSource(store, source_filter=source_filter, since=since),
+        _StoredOrderBookSource(store, source_filter=source_filter, since=since, until=until, session_id=session_id),
         settlement_prices,
         sorted(set(actual_sources)),
     )
@@ -981,6 +1216,8 @@ def _stored_settlement_prices(
     store: SQLiteStore,
     source_filter: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    session_id: str | None = None,
 ):
     clauses = ["snapshot_type = 'settlement_price'", "status = 'ok'"]
     params = []
@@ -990,9 +1227,15 @@ def _stored_settlement_prices(
     elif source_filter == "public":
         clauses.append("source_name NOT LIKE ?")
         params.append("mock:%")
+    if session_id is not None:
+        clauses.append("session_id = ?")
+        params.append(session_id)
     if since is not None:
         clauses.append("observed_at >= ?")
         params.append(since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
+    if until is not None:
+        clauses.append("observed_at <= ?")
+        params.append(until.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
     rows = store.rows(
         f"""
         SELECT asset, payload_json, observed_at, source_name
@@ -1022,6 +1265,7 @@ def _stored_settlement_prices(
 def _log_market_raw_snapshots(
     store: SQLiteStore,
     now: datetime,
+    session_id: str | None,
     source_name: str,
     markets,
     orderbooks,
@@ -1047,6 +1291,7 @@ def _log_market_raw_snapshots(
             ]
         },
         status=status,
+        session_id=session_id,
     )
     for token_id, book in orderbooks.items():
         store.log_raw_snapshot(
@@ -1062,12 +1307,14 @@ def _log_market_raw_snapshots(
                 "last_trade_price": book.last_trade_price,
             },
             status=status,
+            session_id=session_id,
         )
 
 
 def _log_discovery_raw_snapshots(
     store: SQLiteStore,
     now: datetime,
+    session_id: str | None,
     source_name: str,
     candidates,
     orderbooks,
@@ -1094,6 +1341,7 @@ def _log_discovery_raw_snapshots(
             ]
         },
         status="ok",
+        session_id=session_id,
     )
     for candidate in candidates:
         if candidate.orderbook_status == "FOUND":
@@ -1115,6 +1363,7 @@ def _log_discovery_raw_snapshots(
                         "last_trade_price": book.last_trade_price,
                     },
                     status="ok",
+                    session_id=session_id,
                 )
         elif candidate.orderbook_status.startswith("FAILED"):
             store.log_raw_snapshot(
@@ -1125,6 +1374,7 @@ def _log_discovery_raw_snapshots(
                 {"market_slug": candidate.slug, "token_ids": [candidate.up_token_id, candidate.down_token_id]},
                 status="failed",
                 error_message=candidate.reason,
+                session_id=session_id,
             )
 
 
@@ -1237,6 +1487,53 @@ def _parse_since(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _parse_until(value: str | None) -> datetime | None:
+    return _parse_since(value)
+
+
+def _resolved_time_filters(store: SQLiteStore, args) -> tuple[str | None, datetime | None, datetime | None]:
+    session_id = getattr(args, "session_id", None)
+    since = _parse_since(getattr(args, "since", None))
+    until = _parse_until(getattr(args, "until", None))
+    if session_id and (since is not None or until is not None):
+        _, session_since, session_until = _session_bounds(store, session_id)
+        since = max(value for value in (since, session_since) if value is not None)
+        if until is None:
+            until = session_until
+        elif session_until is not None:
+            until = min(until, session_until)
+    return session_id, since, until
+
+
+def _session_row(store: SQLiteStore, args):
+    session_id = getattr(args, "session_id", None)
+    latest = bool(getattr(args, "latest", False))
+    if session_id:
+        return store.research_session_by_id(session_id)
+    if latest:
+        return store.latest_research_session()
+    return store.latest_research_session()
+
+
+def _session_bounds(store: SQLiteStore, session_id: str) -> tuple[str, datetime, datetime | None]:
+    row = store.research_session_by_id(session_id)
+    if row is None:
+        raise ValueError(f"unknown session_id: {session_id}")
+    since = _parse_since(str(row["started_at"]))
+    until = _parse_until(str(row["ended_at"])) if row["ended_at"] else None
+    if until is None:
+        session_rows = store.raw_snapshot_rows(session_id=session_id)
+        if session_rows:
+            until = _parse_until(str(session_rows[-1]["observed_at"]))
+    return session_id, since, until
+
+
+def _recommended_next_command(verdict: str, session_id: str) -> str:
+    if verdict == "READY_FOR_PUBLIC_REPLAY":
+        return f"python -m src.main research-report --session-id {session_id}"
+    return f"python -m src.main observe --cycles 10 --interval-seconds 15"
+
+
 def _format_sources(values) -> str:
     items = [str(value) for value in values]
     return ", ".join(items) if items else "none"
@@ -1249,11 +1546,15 @@ class _StoredCandleSource:
         source_prefix: str | None,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ):
         self.store = store
         self.source_prefix = source_prefix
         self.source_filter = source_filter
         self.since = since
+        self.until = until
+        self.session_id = session_id
 
     def recent_candles(self, asset: Asset, granularity: int = 60):
         prefix = self.source_prefix or None
@@ -1263,6 +1564,8 @@ class _StoredCandleSource:
             source_prefix=prefix,
             source_filter=self.source_filter,
             since=self.since,
+            until=self.until,
+            session_id=self.session_id,
         )
 
 
@@ -1272,13 +1575,23 @@ class _StoredOrderBookSource:
         store: SQLiteStore,
         source_filter: str | None = None,
         since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
     ):
         self.store = store
         self.source_filter = source_filter
         self.since = since
+        self.until = until
+        self.session_id = session_id
 
     def orderbook(self, token_id: str) -> OrderBook | None:
-        return self.store.collected_orderbook(token_id, source_filter=self.source_filter, since=self.since)
+        return self.store.collected_orderbook(
+            token_id,
+            source_filter=self.source_filter,
+            since=self.since,
+            until=self.until,
+            session_id=self.session_id,
+        )
 
 
 if __name__ == "__main__":

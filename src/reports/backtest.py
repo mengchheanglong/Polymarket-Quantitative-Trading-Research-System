@@ -76,17 +76,19 @@ def build_backtest_report(
     strategy: str,
     source_filter: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    session_id: str | None = None,
 ) -> BacktestReport:
-    run_id = _latest_run_id_for_source(store, source_filter)
+    run_id = _latest_run_id_for_source(store, source_filter, session_id)
     if run_id:
         report = build_report(store, starting_balance, run_id=run_id)
     elif source_filter:
         report = _empty_report(source_filter, starting_balance)
     else:
         report = build_report(store, starting_balance)
-    quality = store.data_quality_metrics(source_filter=source_filter, since=since)
-    dataset = store.dataset_summary(source_filter=source_filter, since=since)
-    readiness = store.readiness(source_filter=source_filter or "all", since=since)
+    quality = store.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)
+    dataset = store.dataset_summary(source_filter=source_filter, since=since, until=until, session_id=session_id)
+    readiness = store.readiness(source_filter=source_filter or "all", since=since, until=until, session_id=session_id)
     run = store.run_by_id(run_id) if run_id else None
     if run_id:
         opportunities = store.rows(
@@ -112,7 +114,7 @@ def build_backtest_report(
         else:
             opportunities = store.rows("SELECT COUNT(*) AS count FROM opportunities")[0]["count"]
             accepted = store.rows("SELECT COUNT(*) AS count FROM trades")[0]["count"]
-    markets = len(store.collected_markets(source_filter=source_filter, since=since))
+    markets = len(store.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id))
     return BacktestReport(
         run_id=run_id,
         strategy=strategy,
@@ -140,18 +142,26 @@ def build_backtest_report(
     )
 
 
-def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None) -> str | None:
-    if not source_filter:
+def _latest_run_id_for_source(store: SQLiteStore, source_filter: str | None, session_id: str | None) -> str | None:
+    if not source_filter and not session_id:
         return store.latest_run_id()
+    clauses = []
+    params: list[str] = []
+    if source_filter:
+        clauses.append("data_source = ?")
+        params.append(source_filter)
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
     row = store.rows(
-        """
+        f"""
         SELECT run_id
         FROM runs
-        WHERE data_source = ?
+        WHERE {' AND '.join(clauses)}
         ORDER BY started_at DESC, rowid DESC
         LIMIT 1
         """,
-        (source_filter,),
+        tuple(params),
     )
     return str(row[0]["run_id"]) if row else None
 

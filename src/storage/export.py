@@ -21,11 +21,13 @@ def export_csv(
     out_dir: Path | str,
     source_filter: str | None = None,
     since: datetime | None = None,
+    until: datetime | None = None,
+    session_id: str | None = None,
 ) -> list[Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    rows_by_name = _filtered_rows(store, source_filter=source_filter, since=since)
+    rows_by_name = _filtered_rows(store, source_filter=source_filter, since=since, until=until, session_id=session_id)
     for name in EXPORT_QUERIES:
         rows = rows_by_name[name]
         path = out / f"{name}.csv"
@@ -46,8 +48,10 @@ def _filtered_rows(
     store: SQLiteStore,
     source_filter: str | None,
     since: datetime | None,
+    until: datetime | None,
+    session_id: str | None,
 ) -> dict[str, list]:
-    if source_filter is None and since is None:
+    if source_filter is None and since is None and until is None and session_id is None:
         return {name: store.rows(query) for name, query in EXPORT_QUERIES.items()}
 
     raw_rows = [
@@ -59,9 +63,9 @@ def _filtered_rows(
             "status": row["status"],
             "error_message": row["error_message"],
         }
-        for row in store.raw_snapshot_rows(source_filter=source_filter, since=since)
+        for row in store.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
     ]
-    run_rows = _run_rows(store, source_filter)
+    run_rows = _run_rows(store, source_filter, session_id)
     run_ids = [str(row["run_id"]) for row in run_rows]
     if not run_ids:
         return {
@@ -106,19 +110,27 @@ def _filtered_rows(
     }
 
 
-def _run_rows(store: SQLiteStore, source_filter: str | None) -> list:
-    if source_filter is None:
+def _run_rows(store: SQLiteStore, source_filter: str | None, session_id: str | None) -> list:
+    if source_filter is None and session_id is None:
         return store.rows(EXPORT_QUERIES["runs"])
+    clauses = []
+    params: list[str] = []
+    if source_filter is not None:
+        clauses.append("data_source = ?")
+        params.append(source_filter)
+    if session_id is not None:
+        clauses.append("session_id = ?")
+        params.append(session_id)
     return store.rows(
-        """
+        f"""
         SELECT run_id, strategy, mode, data_source, started_at, ended_at, starting_balance,
                ending_balance, realized_pnl, max_equity_drawdown, max_position_exposure,
                accepted_trade_count, skipped_opportunity_count, notes
         FROM runs
-        WHERE data_source = ?
+        WHERE {' AND '.join(clauses)}
         ORDER BY started_at, rowid
         """,
-        (source_filter,),
+        tuple(params),
     )
 
 

@@ -3,12 +3,19 @@ from __future__ import annotations
 from src.storage.sqlite import SQLiteStore
 
 
-def build_strategy_comparison(store: SQLiteStore, source_filter: str | None = None) -> str:
+def build_strategy_comparison(
+    store: SQLiteStore,
+    source_filter: str | None = None,
+    session_id: str | None = None,
+) -> str:
     clauses = []
     params: list[str] = []
     if source_filter:
         clauses.append("r.data_source = ?")
         params.append(source_filter)
+    if session_id:
+        clauses.append("r.session_id = ?")
+        params.append(session_id)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = store.rows(
         f"""
@@ -27,13 +34,13 @@ def build_strategy_comparison(store: SQLiteStore, source_filter: str | None = No
         """,
         tuple(params),
     )
-    lines = ["Strategy comparison", f"Source filter: {source_filter or 'all'}"]
+    lines = ["Strategy comparison", f"Source filter: {source_filter or 'all'}", f"Session ID: {session_id or 'none'}"]
     if not rows:
         lines.append("No runs found.")
         return "\n".join(lines)
 
     lines.append("Latest runs:")
-    latest_rows = _latest_rows_by_strategy(store, source_filter)
+    latest_rows = _latest_rows_by_strategy(store, source_filter, session_id)
     for row in latest_rows:
         lines.append(
             " | ".join(
@@ -56,6 +63,9 @@ def build_strategy_comparison(store: SQLiteStore, source_filter: str | None = No
         if source_filter:
             filter_clauses.append("r.data_source = ?")
             filter_params.append(source_filter)
+        if session_id:
+            filter_clauses.append("r.session_id = ?")
+            filter_params.append(session_id)
         filter_where = " AND ".join(filter_clauses)
         win_row = store.rows(
             f"""
@@ -99,24 +109,33 @@ def build_strategy_comparison(store: SQLiteStore, source_filter: str | None = No
     return "\n".join(lines)
 
 
-def _latest_rows_by_strategy(store: SQLiteStore, source_filter: str | None) -> list:
-    if source_filter:
+def _latest_rows_by_strategy(store: SQLiteStore, source_filter: str | None, session_id: str | None) -> list:
+    if source_filter or session_id:
+        clauses = []
+        params: list[str] = []
+        if source_filter:
+            clauses.append("data_source = ?")
+            params.append(source_filter)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = " AND ".join(clauses)
         return store.rows(
-            """
+            f"""
             SELECT r.*
             FROM runs r
             JOIN (
                 SELECT strategy, MAX(started_at) AS latest_started_at
                 FROM runs
-                WHERE data_source = ?
+                WHERE {where}
                 GROUP BY strategy
             ) latest
                 ON latest.strategy = r.strategy
                AND latest.latest_started_at = r.started_at
-            WHERE r.data_source = ?
+            WHERE {where}
             ORDER BY r.strategy, r.started_at DESC, r.rowid DESC
             """,
-            (source_filter, source_filter),
+            tuple(params + params),
         )
     return store.rows(
         """

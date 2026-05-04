@@ -20,6 +20,9 @@ python -m src.main sweep --strategy momentum --source demo
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main sessions
+python -m src.main session-report --latest
+python -m src.main research-report --latest
 python -m src.main dataset --source public
 python -m src.main discover-markets --asset BTC
 python -m src.main discover-markets --asset ETH
@@ -27,6 +30,7 @@ python -m src.main readiness
 python -m src.main markets --source public
 python -m src.main diagnostics --source public
 python -m src.main sweep --strategy momentum --source public
+python -m src.main export --format csv --out exports --session-id <session_id>
 python -m src.main export --format csv --out exports --source public
 ```
 
@@ -107,6 +111,8 @@ Accepted `0` trades can be the correct result. If diagnostics show negative edge
 
 Threshold sweeps are research only. They replay stored snapshots with temporary paper-only overrides and do not modify the default config, do not call external APIs, and do not prove live profitability even if a row looks better than the default.
 
+Phase 9 adds long-running research sessions. Replay, diagnostics, sweeps, compare, backtest reporting, and export can all be tied back to one observed public-data session instead of mixing later data into the same analysis window.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.
@@ -117,6 +123,17 @@ python -m src.main observe --cycles 3 --interval-seconds 0
 ```
 
 Each cycle attempts public exchange prices and public Polymarket market/orderbook data. Recoverable network failures are recorded as failed raw snapshots and the loop continues.
+
+Each observe run creates a `session_id` and records start/end time, cycle counts, sources used, and snapshot totals.
+
+```powershell
+python -m src.main sessions
+python -m src.main session-report --latest
+python -m src.main session-report --session-id <session_id>
+python -m src.main research-report --latest
+```
+
+`observe` handles `Ctrl+C` gracefully, finalizes the partial session, preserves data, and prints the next analysis command.
 
 Summarize the local dataset:
 
@@ -139,6 +156,7 @@ Export local research data to CSV:
 ```powershell
 python -m src.main export --format csv --out exports
 python -m src.main export --format csv --out exports --source public
+python -m src.main export --format csv --out exports --session-id <session_id>
 ```
 
 Exports include raw snapshot summaries, trades, skipped opportunities, runs, and equity snapshots. There are no wallet/private-key fields to export.
@@ -149,16 +167,17 @@ Suggested safe workflow:
 python -m src.main collect --demo
 python -m src.main run-paper --strategy momentum
 python -m src.main replay --strategy momentum --source demo
-python -m src.main observe --duration-minutes 5 --interval-seconds 15
+python -m src.main observe --duration-minutes 60 --interval-seconds 15
+python -m src.main session-report --latest
 python -m src.main dataset --source public
 python -m src.main readiness
-python -m src.main replay --strategy momentum --source public
-python -m src.main replay --strategy pair-cost --source public
-python -m src.main diagnostics --source public
-python -m src.main sweep --strategy momentum --source public
-python -m src.main sweep --strategy pair-cost --source public
-python -m src.main compare
-python -m src.main export --format csv --out exports --source public
+python -m src.main replay --strategy momentum --source public --session-id <session_id>
+python -m src.main replay --strategy pair-cost --source public --session-id <session_id>
+python -m src.main diagnostics --source public --session-id <session_id>
+python -m src.main sweep --strategy momentum --source public --session-id <session_id>
+python -m src.main sweep --strategy pair-cost --source public --session-id <session_id>
+python -m src.main compare --source public --session-id <session_id>
+python -m src.main export --format csv --out exports --session-id <session_id>
 ```
 
 ## Source-Aware Research
@@ -183,6 +202,16 @@ python -m src.main replay --strategy momentum --source public --since "2026-05-0
 ```
 
 Public replay never falls back to demo data. If public Polymarket markets or orderbooks are missing, replay exits clearly and leaves demo data unused.
+
+Session-aware analysis commands can use the stored session window directly:
+
+```powershell
+python -m src.main replay --strategy momentum --source public --session-id <session_id>
+python -m src.main diagnostics --source public --session-id <session_id>
+python -m src.main sweep --strategy pair-cost --source public --session-id <session_id>
+python -m src.main backtest-report --source public --session-id <session_id>
+python -m src.main compare --source public --session-id <session_id>
+```
 
 Check whether the dataset is ready for public replay:
 

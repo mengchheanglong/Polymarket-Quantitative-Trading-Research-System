@@ -34,11 +34,15 @@ python -m src.main sweep --strategy momentum --source demo
 python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main sessions
+python -m src.main session-report --latest
+python -m src.main research-report --latest
 python -m src.main dataset --source public
 python -m src.main discover-markets --asset BTC
 python -m src.main discover-markets --asset ETH
 python -m src.main readiness
 python -m src.main markets --source public
+python -m src.main export --format csv --out exports --session-id <session_id>
 python -m src.main export --format csv --out exports --source public
 ```
 
@@ -55,6 +59,15 @@ Observe public snapshots repeatedly without trading:
 ```powershell
 python -m src.main observe --duration-minutes 5 --interval-seconds 15
 python -m src.main observe --cycles 3 --interval-seconds 0
+```
+
+Inspect stored research sessions:
+
+```powershell
+python -m src.main sessions
+python -m src.main session-report --latest
+python -m src.main session-report --session-id <session_id>
+python -m src.main research-report --latest
 ```
 
 Summarize the local dataset:
@@ -115,6 +128,7 @@ Replay stored snapshots without external APIs:
 python -m src.main replay --strategy momentum --source demo
 python -m src.main replay --strategy momentum --source public
 python -m src.main replay --strategy pair-cost --source public
+python -m src.main replay --strategy momentum --source public --session-id <session_id>
 ```
 
 Summarize replay/backtest and data quality:
@@ -136,6 +150,7 @@ Compare strategies across stored runs:
 python -m src.main compare
 python -m src.main compare --source public
 python -m src.main compare --source demo
+python -m src.main compare --source public --session-id <session_id>
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -154,6 +169,7 @@ python -m src.main sweep --strategy momentum --source demo
 python -m src.main sweep --strategy pair-cost --source demo
 python -m src.main sweep --strategy momentum --source public
 python -m src.main sweep --strategy pair-cost --source public
+python -m src.main sweep --strategy pair-cost --source public --session-id <session_id>
 ```
 
 Report scopes:
@@ -183,12 +199,13 @@ Suggested safe workflow:
 python -m src.main collect --demo
 python -m src.main run-paper --strategy momentum
 python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main session-report --latest
 python -m src.main dataset --source public
 python -m src.main readiness
-python -m src.main replay --strategy momentum --source public
-python -m src.main replay --strategy pair-cost --source public
-python -m src.main compare
-python -m src.main export --format csv --out exports --source public
+python -m src.main replay --strategy momentum --source public --session-id <session_id>
+python -m src.main replay --strategy pair-cost --source public --session-id <session_id>
+python -m src.main compare --source public --session-id <session_id>
+python -m src.main export --format csv --out exports --session-id <session_id>
 ```
 
 Run the paper-only pair-cost research skeleton:
@@ -208,5 +225,6 @@ Public discovery process:
 - Active/open Gamma markets list.
 - Direct `btc-updown-*` and `eth-updown-*` slug probes near the current time.
 - Token extraction from public `clobTokenIds`, `tokens`, and outcome-token objects.
+- Observe sessions track session ids, cycle counts, and partial-session completion safely.
 - Public CLOB orderbook capture through public market-data endpoints only.
 - Diagnostics and sweeps use stored snapshots only. They never call external APIs.
