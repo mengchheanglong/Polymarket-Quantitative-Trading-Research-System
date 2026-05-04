@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from src.models import Candle, Market, OpportunityDecision, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
+from src.models import Candle, DiscoveredMarket, Market, OpportunityDecision, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
 
 
 SCHEMA = """
@@ -101,6 +101,30 @@ CREATE TABLE IF NOT EXISTS collected_orderbooks (
     is_mock INTEGER NOT NULL,
     source_name TEXT NOT NULL DEFAULT 'unknown',
     collected_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discovered_markets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    market_slug TEXT NOT NULL,
+    title TEXT NOT NULL,
+    asset_label TEXT NOT NULL,
+    classification TEXT NOT NULL,
+    classification_reasons_json TEXT NOT NULL,
+    token_status TEXT NOT NULL,
+    orderbook_status TEXT NOT NULL,
+    up_token_id TEXT,
+    down_token_id TEXT,
+    condition_id TEXT,
+    active INTEGER NOT NULL,
+    closed INTEGER NOT NULL,
+    accepting_orders INTEGER,
+    window_start TEXT,
+    window_end TEXT,
+    source_url TEXT NOT NULL,
+    accepted INTEGER NOT NULL,
+    reason TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
@@ -293,6 +317,50 @@ class SQLiteStore:
                 for market in markets
                 for token_id in (market.up_token_id, market.down_token_id)
                 for book in (orderbooks[token_id],)
+            ],
+        )
+        self.conn.commit()
+
+    def log_discovered_markets(
+        self,
+        now: datetime,
+        source_name: str,
+        candidates: list[DiscoveredMarket],
+    ) -> None:
+        self.conn.executemany(
+            """
+            INSERT INTO discovered_markets
+                (observed_at, source_name, market_id, market_slug, title, asset_label, classification,
+                 classification_reasons_json, token_status, orderbook_status, up_token_id, down_token_id,
+                 condition_id, active, closed, accepting_orders, window_start, window_end, source_url,
+                 accepted, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    _iso(now),
+                    source_name,
+                    candidate.market_id,
+                    candidate.slug,
+                    candidate.title,
+                    candidate.asset_label,
+                    candidate.classification.value,
+                    json.dumps(list(candidate.classification_reasons), sort_keys=True),
+                    candidate.token_status,
+                    candidate.orderbook_status,
+                    candidate.up_token_id,
+                    candidate.down_token_id,
+                    candidate.condition_id,
+                    int(candidate.active),
+                    int(candidate.closed),
+                    int(candidate.accepting_orders) if candidate.accepting_orders is not None else None,
+                    _iso(candidate.window_start) if candidate.window_start else None,
+                    _iso(candidate.window_end) if candidate.window_end else None,
+                    candidate.source_url,
+                    int(candidate.accepted),
+                    candidate.reason,
+                )
+                for candidate in candidates
             ],
         )
         self.conn.commit()
@@ -747,6 +815,26 @@ class SQLiteStore:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self.rows(f"SELECT * FROM raw_snapshots {where} ORDER BY observed_at, id", tuple(params))
 
+    def discovered_market_rows(
+        self,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.rows(
+            f"SELECT * FROM discovered_markets {where} ORDER BY observed_at, market_slug, id",
+            tuple(params),
+        )
+
     def dataset_summary(
         self,
         source_filter: str | None = None,
@@ -784,7 +872,7 @@ class SQLiteStore:
                 id_params,
             )
         ]
-        market_rows = self._market_rows(source_filter=source_filter, since=since)
+        market_rows = self._visible_market_rows(source_filter=source_filter, since=since)
         quality = self.data_quality_metrics(source_filter=source_filter, since=since)
         actual_sources = {str(row["source_name"]) for row in rows}
         return {
@@ -824,14 +912,23 @@ class SQLiteStore:
         latest_prices = self.latest_prices(source_filter=source_filter, since=since)
         missing_prices = sum(1 for asset in ("BTC", "ETH") if asset not in latest_prices)
         markets = self.collected_markets(source_filter=source_filter, since=since)
+        discovered_rows = self.discovered_market_rows(source_filter=source_filter, since=since)
         missing_orderbooks = 0
         wide_spreads = 0
         low_liquidity = 0
+        if source_filter == "public":
+            directional = [
+                row
+                for row in discovered_rows
+                if int(row["accepted"]) == 1
+            ]
+            missing_orderbooks = sum(1 for row in directional if str(row["orderbook_status"]) != "FOUND")
         for market in markets:
             for token_id in (market.up_token_id, market.down_token_id):
                 book = self.collected_orderbook(token_id, source_filter=source_filter, since=since)
                 if book is None:
-                    missing_orderbooks += 1
+                    if source_filter != "public":
+                        missing_orderbooks += 1
                     continue
                 if book.spread is not None and book.spread > wide_spread:
                     wide_spreads += 1
@@ -881,6 +978,31 @@ class SQLiteStore:
         source_filter: str | None = None,
         since: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        rows = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
+        if rows:
+            output: list[dict[str, Any]] = []
+            for row in rows:
+                output.append(
+                    {
+                        "market_id": str(row["market_id"]),
+                        "slug": str(row["market_slug"]),
+                        "asset": str(row["asset_label"]),
+                        "title": str(row["title"]),
+                        "source": str(row["source_name"]),
+                        "classification": str(row["classification"]),
+                        "token_status": str(row["token_status"]),
+                        "orderbook_status": str(row["orderbook_status"]),
+                        "accepted": bool(row["accepted"]),
+                        "reason": str(row["reason"]),
+                        "first_seen": str(row["first_seen"]),
+                        "latest_seen": str(row["latest_seen"]),
+                        "up_token_id": row["up_token_id"],
+                        "down_token_id": row["down_token_id"],
+                        "active": bool(row["active"]),
+                        "closed": bool(row["closed"]),
+                    }
+                )
+            return output
         rows = self._market_rows(source_filter=source_filter, since=since)
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -893,10 +1015,17 @@ class SQLiteStore:
                     "asset": str(row["asset"]),
                     "title": str(row["title"]),
                     "source": str(row["source_name"]),
-                    "detected_type": "mock" if bool(row["is_mock"]) else _detected_market_type(str(row["title"]), str(row["market_slug"])),
-                    "orderbook_available": bool(up_book and down_book),
+                    "classification": "mock" if bool(row["is_mock"]) else _detected_market_type(str(row["title"]), str(row["market_slug"])),
+                    "token_status": "FOUND",
+                    "orderbook_status": "FOUND" if up_book and down_book else "MISSING",
+                    "accepted": True,
+                    "reason": "accepted: stored market",
                     "first_seen": str(row["first_seen"]),
                     "latest_seen": str(row["latest_seen"]),
+                    "up_token_id": row["up_token_id"],
+                    "down_token_id": row["down_token_id"],
+                    "active": True,
+                    "closed": False,
                 }
             )
         return output
@@ -904,30 +1033,49 @@ class SQLiteStore:
     def readiness(self, source_filter: str | None = "public", since: datetime | None = None) -> dict[str, Any]:
         summary = self.dataset_summary(source_filter=source_filter, since=since)
         prices = self.latest_prices(source_filter=source_filter, since=since)
+        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
         markets = self.collected_markets(source_filter=source_filter, since=since)
         orderbooks = [
             self.collected_orderbook(token_id, source_filter=source_filter, since=since)
             for market in markets
             for token_id in (market.up_token_id, market.down_token_id)
         ]
-        market_assets = {market.asset.value for market in markets}
+        market_assets = {
+            str(row["asset_label"])
+            for row in discovered
+            if str(row["asset_label"]) in {"BTC", "ETH"}
+        } or {market.asset.value for market in markets}
         price_assets = set(prices.keys())
         has_exchange_prices = bool(price_assets)
-        has_markets = bool(markets)
+        has_markets = bool(discovered or markets)
         has_orderbooks = bool(orderbooks) and all(book is not None for book in orderbooks)
-        verdict = "READY_FOR_REPLAY"
+        directional = [
+            row
+            for row in discovered
+            if str(row["classification"]) in {"crypto_up_down", "crypto_higher_lower"}
+            and int(row["accepted"]) == 1
+        ]
+        token_ready = [row for row in directional if str(row["token_status"]) == "FOUND"]
+        orderbook_ready = [row for row in directional if str(row["orderbook_status"]) == "FOUND"]
+        verdict = "READY_FOR_PUBLIC_REPLAY" if source_filter == "public" else "READY_FOR_REPLAY"
         if summary["demo_included"] and summary["public_included"] and source_filter in (None, "all"):
             verdict = "MIXED_DEMO_AND_PUBLIC_DATA"
         elif not has_exchange_prices:
             verdict = "MISSING_EXCHANGE_PRICES"
+        elif source_filter == "public" and not directional:
+            verdict = "NO_PUBLIC_CRYPTO_MARKETS"
+        elif source_filter == "public" and not token_ready:
+            verdict = "NO_PUBLIC_TOKEN_IDS"
+        elif source_filter == "public" and not orderbook_ready:
+            verdict = "NO_PUBLIC_ORDERBOOKS"
         elif not has_markets:
             verdict = "INSUFFICIENT_PUBLIC_DATA" if source_filter == "public" else "MISSING_ORDERBOOKS"
         elif not has_orderbooks:
             verdict = "MISSING_ORDERBOOKS"
         elif not (market_assets & price_assets):
-            verdict = "INSUFFICIENT_PUBLIC_DATA"
+            verdict = "INSUFFICIENT_OVERLAP" if source_filter == "public" else "INSUFFICIENT_PUBLIC_DATA"
         elif len(self.raw_snapshot_rows(source_filter=source_filter, since=since)) < 3:
-            verdict = "INSUFFICIENT_PUBLIC_DATA"
+            verdict = "INSUFFICIENT_SNAPSHOTS" if source_filter == "public" else "INSUFFICIENT_PUBLIC_DATA"
         return {
             "verdict": verdict,
             "source_filter": source_filter or "all",
@@ -938,14 +1086,62 @@ class SQLiteStore:
             "has_exchange_prices": has_exchange_prices,
             "has_polymarket_markets": has_markets,
             "has_polymarket_orderbooks": has_orderbooks,
+            "has_public_token_ids": bool(token_ready),
             "asset_overlap": sorted(market_assets & price_assets),
             "snapshot_count": summary["total_snapshots"],
-            "market_count": len(markets),
+            "market_count": len(directional or markets),
             "orderbook_count": sum(1 for book in orderbooks if book is not None),
             "exchange_price_count": summary["exchange_price_snapshots"],
             "wide_spreads": self.data_quality_metrics(source_filter=source_filter, since=since)["wide_spreads"],
             "missing_orderbooks": self.data_quality_metrics(source_filter=source_filter, since=since)["missing_orderbooks"],
+            "token_count": len(token_ready),
+            "timestamps_overlap": bool(market_assets & price_assets),
+            "minimum_snapshot_count_met": summary["total_snapshots"] >= 3,
         }
+
+    def _visible_market_rows(
+        self,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+    ) -> list[sqlite3.Row]:
+        discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since)
+        if discovered:
+            return discovered
+        return self._market_rows(source_filter=source_filter, since=since)
+
+    def _discovered_market_aggregate_rows(
+        self,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+    ) -> list[sqlite3.Row]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self.rows(
+            f"""
+            SELECT dm.market_id, dm.market_slug, dm.title, dm.asset_label, dm.classification,
+                   dm.token_status, dm.orderbook_status, dm.up_token_id, dm.down_token_id,
+                   dm.source_name, dm.accepted, dm.reason, dm.active, dm.closed,
+                   agg.first_seen, agg.latest_seen
+            FROM discovered_markets dm
+            JOIN (
+                SELECT market_slug, MIN(observed_at) AS first_seen, MAX(observed_at) AS latest_seen, MAX(id) AS latest_id
+                FROM discovered_markets
+                {where}
+                GROUP BY market_slug
+            ) agg
+                ON agg.latest_id = dm.id
+            ORDER BY agg.latest_seen, dm.market_slug
+            """,
+            tuple(params),
+        )
 
     def _market_rows(
         self,
@@ -987,6 +1183,7 @@ class SQLiteStore:
             "candles",
             "collected_markets",
             "collected_orderbooks",
+            "discovered_markets",
             "raw_snapshots",
             "app_state",
         ):

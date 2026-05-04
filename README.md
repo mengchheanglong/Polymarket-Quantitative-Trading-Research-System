@@ -19,6 +19,8 @@ python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
 python -m src.main dataset --source public
+python -m src.main discover-markets --asset BTC
+python -m src.main discover-markets --asset ETH
 python -m src.main readiness
 python -m src.main markets --source public
 python -m src.main export --format csv --out exports --source public
@@ -100,6 +102,14 @@ python -m src.main dataset --source demo
 python -m src.main dataset --source public
 ```
 
+Probe public BTC/ETH market discovery directly:
+
+```powershell
+python -m src.main discover-markets --asset BTC
+python -m src.main discover-markets --asset ETH
+python -m src.main discover-markets --asset all
+```
+
 Export local research data to CSV:
 
 ```powershell
@@ -156,13 +166,24 @@ python -m src.main readiness --source public
 
 Readiness reports whether exchange prices, Polymarket markets, orderbooks, overlapping timestamps/assets, spreads, and snapshot counts are sufficient. Verdicts include `READY_FOR_REPLAY`, `INSUFFICIENT_PUBLIC_DATA`, `MIXED_DEMO_AND_PUBLIC_DATA`, `MISSING_ORDERBOOKS`, and `MISSING_EXCHANGE_PRICES`.
 
+Phase 7 adds public-market-specific readiness verdicts:
+
+- `READY_FOR_PUBLIC_REPLAY`
+- `NO_PUBLIC_CRYPTO_MARKETS`
+- `NO_PUBLIC_TOKEN_IDS`
+- `NO_PUBLIC_ORDERBOOKS`
+- `INSUFFICIENT_OVERLAP`
+- `INSUFFICIENT_SNAPSHOTS`
+
 Audit discovered Polymarket markets:
 
 ```powershell
 python -m src.main markets --source public
 ```
 
-The market audit shows market id, slug, asset, title, source, detected type, orderbook availability, first seen timestamp, and latest seen timestamp.
+The market audit shows market id, slug, asset, title, source, classification, token status, orderbook status, first seen timestamp, latest seen timestamp, and accepted/rejected reason.
+
+Public discovery uses public Gamma search, active/open Gamma events, active/open Gamma markets, and direct BTC/ETH `updown` slug probes near the current time. Token IDs are extracted from public fields such as `clobTokenIds`, `tokens`, and outcome-token objects when available. Public orderbook capture uses public CLOB market-data only. No wallet, private key, authenticated API, or order execution path is involved.
 
 ## Runs And Experiments
 

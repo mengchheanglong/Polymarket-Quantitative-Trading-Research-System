@@ -4,10 +4,10 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## Polymarket Official Docs
 
-- Useful for: public market discovery, public CLOB orderbook reads, field names, endpoint behavior, observe-mode capture, raw snapshot design, and validating whether discovered markets are real public markets or demo fixtures.
+- Useful for: public market discovery, public CLOB orderbook reads, field names, endpoint behavior, observe-mode capture, raw snapshot design, token-id extraction, and validating whether discovered markets are real public markets or demo fixtures.
 - Do not copy yet: authenticated trading flows, API key flows, wallet flows, signing, or order submission.
 - Safety warning: public reads are acceptable for Phase 2 and Phase 3; anything involving credentials or execution is out of scope.
-- Phase: Phase 2 and Phase 3 for public data capture; Phase 6 for source-aware readiness and market discovery audit; later only if the project explicitly remains safety-reviewed.
+- Phase: Phase 2 and Phase 3 for public data capture; Phase 6 for source-aware readiness and market discovery audit; Phase 7 for directional-market discovery, token-id extraction, and public orderbook capture; later only if the project explicitly remains safety-reviewed.
 
 ## Gabagool Repo
 

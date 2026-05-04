@@ -8,7 +8,7 @@ from pathlib import Path
 
 from src.collectors.exchange import CoinbaseCollector, FallbackExchangeCollector, KrakenCollector
 from src.collectors.mock_markets import MockMarketSource
-from src.collectors.polymarket import PolymarketPublicCollector
+from src.collectors.polymarket import PolymarketPublicCollector, _candidate_to_market
 from src.config import AgentConfig, load_config
 from src.http_client import HttpError
 from src.models import Asset, OpportunityDecision, OrderBook, Signal
@@ -96,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     markets_parser = subcommands.add_parser("markets", help="Audit discovered Polymarket markets")
     markets_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     markets_parser.add_argument("--since", help="Only inspect markets collected at or after this UTC ISO timestamp.")
+    discover_parser = subcommands.add_parser("discover-markets", help="Probe public Polymarket market discovery")
+    discover_parser.add_argument("--asset", choices=("BTC", "ETH", "all"), default="all")
     export_parser = subcommands.add_parser("export", help="Export local research data")
     export_parser.add_argument("--format", choices=("csv",), default="csv")
     export_parser.add_argument("--out", default="exports")
@@ -139,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
             return readiness(config, args)
         if args.command == "markets":
             return market_audit(config, args)
+        if args.command == "discover-markets":
+            return discover_markets(config, args)
         if args.command == "export":
             return export_data(config, args)
     except SafetyError as exc:
@@ -251,7 +255,10 @@ def collect(config: AgentConfig) -> int:
 
         polymarket = PolymarketPublicCollector(config.gamma_base_url, config.clob_base_url)
         try:
-            markets = polymarket.discover_updown_markets(config.max_market_duration_minutes)
+            candidates = polymarket.discover_market_candidates(
+                max_duration_minutes=config.max_market_duration_minutes,
+            )
+            candidates, orderbooks = polymarket.capture_orderbooks(candidates)
         except Exception as exc:
             store.log_raw_snapshot(
                 now,
@@ -263,43 +270,40 @@ def collect(config: AgentConfig) -> int:
                 error_message=str(exc),
             )
             raise HttpError(f"public Polymarket collection failed: {exc}") from exc
-        if not markets:
+        store.log_discovered_markets(now, "polymarket-public", candidates)
+        accepted_markets = [
+            market
+            for candidate in candidates
+            for market in [_candidate_to_market(candidate)]
+            if market is not None
+        ]
+        complete_markets = [
+            market
+            for candidate in candidates
+            if candidate.orderbook_status == "FOUND"
+            for market in [_candidate_to_market(candidate)]
+            if market is not None
+        ]
+        complete_orderbooks = {
+            token_id: orderbooks[token_id]
+            for market in complete_markets
+            for token_id in (market.up_token_id, market.down_token_id)
+            if token_id in orderbooks
+        }
+        _log_discovery_raw_snapshots(store, now, "polymarket-public", candidates, complete_orderbooks)
+        store.set_state("last_collection_mode", "public", now)
+        if not accepted_markets:
             print("No active short-duration BTC/ETH UP-DOWN markets discovered from public endpoints.")
             print("Use collect --demo or USE_MOCK_DATA=true for offline demo data.")
             store.replace_collected_market_data(now, [], {}, source_name="polymarket-public")
-            store.log_raw_snapshot(
-                now,
-                "polymarket-public",
-                None,
-                "market_metadata",
-                {"markets": []},
-                status="ok",
-            )
         else:
-            orderbooks = {}
-            complete_markets = []
-            for market in markets:
-                try:
-                    up_book = polymarket.orderbook(market.up_token_id)
-                    down_book = polymarket.orderbook(market.down_token_id)
-                except Exception as exc:
-                    store.log_raw_snapshot(
-                        now,
-                        "polymarket-public",
-                        market.asset.value,
-                        "orderbook",
-                        {"market_slug": market.slug},
-                        status="failed",
-                        error_message=str(exc),
-                    )
-                    continue
-                orderbooks[market.up_token_id] = up_book
-                orderbooks[market.down_token_id] = down_book
-                complete_markets.append(market)
-            store.replace_collected_market_data(now, complete_markets, orderbooks, source_name="polymarket-public")
-            _log_market_raw_snapshots(store, now, "polymarket-public", markets, orderbooks, "ok")
-            store.set_state("last_collection_mode", "public", now)
-            print(f"Discovered {len(markets)} candidate Polymarket UP/DOWN markets.")
+            store.replace_collected_market_data(
+                now,
+                complete_markets,
+                complete_orderbooks,
+                source_name="polymarket-public",
+            )
+            print(f"Discovered {len(accepted_markets)} directional public Polymarket markets.")
             print(f"Stored complete orderbooks for {len(complete_markets)} markets.")
             for market in complete_markets[:10]:
                 print(f"{market.asset.value} {market.slug} ends {market.window.end.isoformat()}")
@@ -449,6 +453,13 @@ def replay(config: AgentConfig, args) -> int:
             if orderbook_source.orderbook(market.up_token_id) is None
             or orderbook_source.orderbook(market.down_token_id) is None
         ]
+        if missing_books and source_filter == "public":
+            print(
+                "Replay cannot run with --source public: public data is insufficient; "
+                "stored public orderbooks are missing for " + ", ".join(missing_books[:5]) + ". "
+                "Demo data was not used."
+            )
+            return 1
         if missing_books and config.strategy == "pair-cost":
             print(
                 "Replay cannot run pair-cost: missing stored orderbooks for "
@@ -610,10 +621,14 @@ def readiness(config: AgentConfig, args) -> int:
         print(f"Dataset includes public: {result['dataset_sources']['public']}")
         print(f"Exchange prices: {result['has_exchange_prices']}")
         print(f"Polymarket markets: {result['has_polymarket_markets']}")
+        print(f"Public token ids: {result['has_public_token_ids']}")
         print(f"Polymarket orderbooks: {result['has_polymarket_orderbooks']}")
         print(f"Asset overlap: {_format_sources(result['asset_overlap'])}")
+        print(f"Timestamps overlap: {result['timestamps_overlap']}")
+        print(f"Minimum snapshot count met: {result['minimum_snapshot_count_met']}")
         print(f"Snapshots: {result['snapshot_count']}")
         print(f"Markets: {result['market_count']}")
+        print(f"Token-ready markets: {result['token_count']}")
         print(f"Orderbooks: {result['orderbook_count']}")
         print(f"Exchange price snapshots: {result['exchange_price_count']}")
         print(f"Wide spreads: {result['wide_spreads']}")
@@ -642,16 +657,55 @@ def market_audit(config: AgentConfig, args) -> int:
                         row["slug"],
                         f"asset={row['asset']}",
                         f"source={row['source']}",
-                        f"type={row['detected_type']}",
-                        f"orderbook={row['orderbook_available']}",
+                        f"classification={row['classification']}",
+                        f"token_status={row['token_status']}",
+                        f"orderbook_status={row['orderbook_status']}",
+                        f"accepted={row['accepted']}",
                         f"first_seen={row['first_seen']}",
                         f"latest_seen={row['latest_seen']}",
+                        f"reason={row['reason']}",
                         f"title={row['title']}",
                     ]
                 )
             )
     finally:
         store.close()
+    return 0
+
+
+def discover_markets(config: AgentConfig, args) -> int:
+    collector = PolymarketPublicCollector(config.gamma_base_url, config.clob_base_url)
+    asset_filter = _asset_filter(getattr(args, "asset", "all"))
+    candidates = collector.discover_market_candidates(
+        asset_filter=asset_filter,
+        max_duration_minutes=config.max_market_duration_minutes,
+    )
+    candidates, _books = collector.capture_orderbooks(candidates)
+    print("Public Polymarket discovery probe")
+    if not candidates:
+        print("No candidate markets found.")
+        return 0
+    for candidate in candidates:
+        print(
+            " | ".join(
+                [
+                    candidate.market_id,
+                    candidate.slug,
+                    f"asset={candidate.asset_label}",
+                    f"classification={candidate.classification.value}",
+                    f"active={candidate.active}",
+                    f"closed={candidate.closed}",
+                    f"token_status={candidate.token_status}",
+                    f"orderbook_status={candidate.orderbook_status}",
+                    f"accepted={candidate.accepted}",
+                    f"yes_token={candidate.up_token_id or 'n/a'}",
+                    f"no_token={candidate.down_token_id or 'n/a'}",
+                    f"window_end={candidate.window_end.isoformat() if candidate.window_end else 'n/a'}",
+                    f"reason={candidate.reason}",
+                    f"title={candidate.title}",
+                ]
+            )
+        )
     return 0
 
 
@@ -890,6 +944,69 @@ def _log_market_raw_snapshots(
         )
 
 
+def _log_discovery_raw_snapshots(
+    store: SQLiteStore,
+    now: datetime,
+    source_name: str,
+    candidates,
+    orderbooks,
+) -> None:
+    store.log_raw_snapshot(
+        now,
+        source_name,
+        None,
+        "market_metadata",
+        {
+            "markets": [
+                {
+                    "market_id": candidate.market_id,
+                    "slug": candidate.slug,
+                    "title": candidate.title,
+                    "asset": candidate.asset_label,
+                    "classification": candidate.classification.value,
+                    "token_status": candidate.token_status,
+                    "orderbook_status": candidate.orderbook_status,
+                    "accepted": candidate.accepted,
+                    "reason": candidate.reason,
+                }
+                for candidate in candidates
+            ]
+        },
+        status="ok",
+    )
+    for candidate in candidates:
+        if candidate.orderbook_status == "FOUND":
+            for token_id in (candidate.up_token_id, candidate.down_token_id):
+                if token_id not in orderbooks:
+                    continue
+                book = orderbooks[token_id]
+                store.log_raw_snapshot(
+                    now,
+                    source_name,
+                    candidate.asset_label if candidate.asset_label in {"BTC", "ETH"} else None,
+                    "orderbook",
+                    {
+                        "market_slug": candidate.slug,
+                        "token_id": token_id,
+                        "best_bid": book.best_bid,
+                        "best_ask": book.best_ask,
+                        "spread": book.spread,
+                        "last_trade_price": book.last_trade_price,
+                    },
+                    status="ok",
+                )
+        elif candidate.orderbook_status.startswith("FAILED"):
+            store.log_raw_snapshot(
+                now,
+                source_name,
+                candidate.asset_label if candidate.asset_label in {"BTC", "ETH"} else None,
+                "orderbook",
+                {"market_slug": candidate.slug, "token_ids": [candidate.up_token_id, candidate.down_token_id]},
+                status="failed",
+                error_message=candidate.reason,
+            )
+
+
 def _signal_for(strategy: MomentumUpDownStrategy, candle_source, asset: Asset) -> Signal:
     candles = candle_source.recent_candles(asset)
     return strategy.signal(asset, candles)
@@ -912,6 +1029,14 @@ def _replace_demo_flag(config: AgentConfig, value: bool) -> AgentConfig:
 
 def _replace_strategy(config: AgentConfig, value: str) -> AgentConfig:
     return AgentConfig(**{**config.__dict__, "strategy": value})
+
+
+def _asset_filter(value: str) -> Asset | None:
+    if value == "BTC":
+        return Asset.BTC
+    if value == "ETH":
+        return Asset.ETH
+    return None
 
 
 def _observe_cycles(duration_minutes: float | None, interval_seconds: float, cycles: int | None) -> int:

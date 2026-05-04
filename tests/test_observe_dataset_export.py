@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.main import main
-from src.models import Asset, Candle, Market, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
+from src.models import Asset, Candle, DiscoveredMarket, Market, MarketClassification, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
 from src.storage.sqlite import SQLiteStore
 
 
@@ -40,6 +40,68 @@ class FakePolymarket:
                 source_url="mock://observed",
             )
         ]
+
+    def discover_market_candidates(self, asset_filter=None, max_duration_minutes=60):
+        markets = self.discover_updown_markets(max_duration_minutes)
+        candidates = []
+        for market in markets:
+            if asset_filter and market.asset != asset_filter:
+                continue
+            candidates.append(
+                DiscoveredMarket(
+                    market_id=market.market_id,
+                    slug=market.slug,
+                    title=market.title,
+                    asset_label=market.asset.value,
+                    classification=MarketClassification.CRYPTO_UP_DOWN,
+                    classification_reasons=("contains BTC", "contains up/down language", "has token ids"),
+                    token_status="FOUND",
+                    orderbook_status="PENDING",
+                    active=True,
+                    closed=False,
+                    accepting_orders=True,
+                    up_token_id=market.up_token_id,
+                    down_token_id=market.down_token_id,
+                    condition_id=None,
+                    window_start=market.window.start,
+                    window_end=market.window.end,
+                    source_url=market.source_url,
+                    accepted=True,
+                    reason="accepted: fixture directional market",
+                )
+            )
+        return candidates
+
+    def capture_orderbooks(self, candidates):
+        books = {}
+        updated = []
+        for candidate in candidates:
+            books[candidate.up_token_id] = self.orderbook(candidate.up_token_id)
+            books[candidate.down_token_id] = self.orderbook(candidate.down_token_id)
+            updated.append(
+                DiscoveredMarket(
+                    market_id=candidate.market_id,
+                    slug=candidate.slug,
+                    title=candidate.title,
+                    asset_label=candidate.asset_label,
+                    classification=candidate.classification,
+                    classification_reasons=candidate.classification_reasons + ("has public orderbook",),
+                    token_status=candidate.token_status,
+                    orderbook_status="FOUND",
+                    active=candidate.active,
+                    closed=candidate.closed,
+                    accepting_orders=candidate.accepting_orders,
+                    up_token_id=candidate.up_token_id,
+                    down_token_id=candidate.down_token_id,
+                    condition_id=candidate.condition_id,
+                    window_start=candidate.window_start,
+                    window_end=candidate.window_end,
+                    source_url=candidate.source_url,
+                    accepted=candidate.accepted,
+                    reason="accepted: fixture public orderbook captured",
+                )
+            )
+        return updated, books
 
     def orderbook(self, token_id):
         return OrderBook(

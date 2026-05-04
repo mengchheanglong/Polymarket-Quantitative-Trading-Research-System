@@ -15,6 +15,13 @@ class Direction(StrEnum):
     DOWN = "DOWN"
 
 
+class MarketClassification(StrEnum):
+    CRYPTO_UP_DOWN = "crypto_up_down"
+    CRYPTO_HIGHER_LOWER = "crypto_higher_lower"
+    NON_CRYPTO = "non_crypto"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class TimingWindow:
     start: datetime
@@ -119,6 +126,29 @@ class Market:
 
 
 @dataclass(frozen=True)
+class DiscoveredMarket:
+    market_id: str
+    slug: str
+    title: str
+    asset_label: str
+    classification: MarketClassification
+    classification_reasons: tuple[str, ...]
+    token_status: str
+    orderbook_status: str
+    active: bool
+    closed: bool
+    accepting_orders: bool | None
+    up_token_id: str | None
+    down_token_id: str | None
+    condition_id: str | None
+    window_start: datetime | None
+    window_end: datetime | None
+    source_url: str
+    accepted: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class Signal:
     asset: Asset
     direction: Direction
@@ -135,4 +165,3 @@ class OpportunityDecision:
     spread: float | None
     decision: str
     reason: str
-

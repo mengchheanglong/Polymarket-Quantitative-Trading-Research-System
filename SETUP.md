@@ -33,6 +33,8 @@ python -m src.main runs
 python -m src.main compare
 python -m src.main observe --cycles 3 --interval-seconds 0
 python -m src.main dataset --source public
+python -m src.main discover-markets --asset BTC
+python -m src.main discover-markets --asset ETH
 python -m src.main readiness
 python -m src.main markets --source public
 python -m src.main export --format csv --out exports --source public
@@ -67,6 +69,8 @@ Check public replay readiness and inspect market discovery:
 ```powershell
 python -m src.main readiness
 python -m src.main readiness --source public
+python -m src.main discover-markets --asset BTC
+python -m src.main discover-markets --asset ETH
 python -m src.main markets --source public
 ```
 
@@ -172,3 +176,12 @@ python -m src.main report
 ```
 
 Public collection may fail if DNS or outbound internet is unavailable. When that happens, use `collect --demo`.
+
+Public discovery process:
+
+- Gamma public search for BTC/ETH directional markets.
+- Active/open Gamma events with embedded markets.
+- Active/open Gamma markets list.
+- Direct `btc-updown-*` and `eth-updown-*` slug probes near the current time.
+- Token extraction from public `clobTokenIds`, `tokens`, and outcome-token objects.
+- Public CLOB orderbook capture through public market-data endpoints only.

@@ -17,6 +17,9 @@ Phase 1 is paper-only by design.
 - Replay mode reads stored SQLite snapshots and does not call external APIs.
 - Source-aware replay can be restricted to `--source demo` or `--source public`; public replay does not silently fall back to demo data.
 - Backtest reporting summarizes stored snapshots, fake trades, and data quality only, and can be filtered by source.
+- `discover-markets` and `observe` use only public Gamma and public CLOB market-data endpoints.
+- Public market discovery records accepted and rejected candidates, token-id status, and public orderbook status for research auditability.
+- If public token IDs or public orderbooks are missing, public replay refuses clearly instead of substituting demo data.
 - Observe mode only collects public snapshots. It never simulates trades or executes trades.
 - Dataset, readiness, market audit, and export commands can separate demo snapshots from public snapshots.
 - Export writes local research CSV files only. There are no wallet, private-key, signer, or credential columns.

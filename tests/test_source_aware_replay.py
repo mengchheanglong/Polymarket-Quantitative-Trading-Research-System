@@ -115,7 +115,7 @@ def test_public_readiness_insufficient_data(tmp_path, capsys):
     assert main(["--db", str(db_path), "readiness", "--source", "public"]) == 0
 
     stdout = capsys.readouterr().out
-    assert "Verdict: INSUFFICIENT_PUBLIC_DATA" in stdout
+    assert "Verdict: NO_PUBLIC_CRYPTO_MARKETS" in stdout
 
 
 def test_market_discovery_audit_output(tmp_path, capsys):
@@ -127,8 +127,8 @@ def test_market_discovery_audit_output(tmp_path, capsys):
     stdout = capsys.readouterr().out
     assert "Polymarket market discovery audit" in stdout
     assert "demo-btc-updown-main" in stdout
-    assert "type=mock" in stdout
-    assert "orderbook=True" in stdout
+    assert "classification=mock" in stdout
+    assert "orderbook_status=FOUND" in stdout
 
 
 def test_export_source_public_excludes_demo_rows(tmp_path):

@@ -24,6 +24,27 @@ class JsonHttpClient:
         except Exception as exc:  # pragma: no cover - exact urllib failure class varies.
             raise HttpError(f"GET {url} failed: {exc}") from exc
 
+    def post_json(
+        self,
+        base_url: str,
+        path: str = "",
+        payload: Any | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        url = self._url(base_url, path, params)
+        body = json.dumps(payload if payload is not None else {}).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"User-Agent": self.user_agent, "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - exact urllib failure class varies.
+            raise HttpError(f"POST {url} failed: {exc}") from exc
+
     @staticmethod
     def _url(base_url: str, path: str, params: dict[str, Any] | None) -> str:
         url = base_url.rstrip("/")
@@ -33,4 +54,3 @@ class JsonHttpClient:
             filtered = {key: value for key, value in params.items() if value is not None}
             url += "?" + urllib.parse.urlencode(filtered, doseq=True)
         return url
-
