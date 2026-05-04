@@ -34,6 +34,7 @@ class AgentConfig:
     max_market_duration_minutes: int = 60
     use_demo_markets: bool = False
     strategy: str = "momentum"
+    close_mode: str = "expiry-if-known"
     random_seed: int = 7
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
@@ -79,6 +80,7 @@ def load_config() -> AgentConfig:
         max_market_duration_minutes=int(os.environ.get("MAX_MARKET_DURATION_MINUTES", "60")),
         use_demo_markets=use_mock_data or use_demo_markets,
         strategy=os.environ.get("STRATEGY", "momentum"),
+        close_mode=os.environ.get("CLOSE_MODE", "expiry-if-known"),
         random_seed=int(os.environ.get("RANDOM_SEED", "7")),
         gamma_base_url=os.environ.get("GAMMA_BASE_URL", "https://gamma-api.polymarket.com"),
         clob_base_url=os.environ.get("CLOB_BASE_URL", "https://clob.polymarket.com"),

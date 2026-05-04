@@ -74,7 +74,7 @@ def build_strategy_comparison(
                 COUNT(*) AS closed
             FROM trades t
             JOIN runs r ON r.run_id = t.run_id
-            WHERE {filter_where} AND t.status = 'CLOSED'
+            WHERE {filter_where} AND t.status LIKE 'CLOSED%'
             """,
             tuple(filter_params),
         )[0]

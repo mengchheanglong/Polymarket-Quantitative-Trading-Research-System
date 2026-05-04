@@ -87,6 +87,8 @@ class OrderBook:
     bids: tuple[OrderLevel, ...]
     asks: tuple[OrderLevel, ...]
     last_trade_price: float | None = None
+    observed_at: datetime | None = None
+    source: str | None = None
 
     @property
     def best_bid(self) -> float | None:
@@ -120,6 +122,8 @@ class Market:
     down_token_id: str
     source_url: str
     is_mock: bool = False
+    observed_at: datetime | None = None
+    latest_observed_at: datetime | None = None
 
     def token_for(self, direction: Direction) -> str:
         return self.up_token_id if direction == Direction.UP else self.down_token_id
@@ -165,3 +169,6 @@ class OpportunityDecision:
     spread: float | None
     decision: str
     reason: str
+    seconds_to_expiry: float | None = None
+    lifecycle_status: str | None = None
+    timing_bucket: str | None = None

@@ -9,6 +9,7 @@ from src.config import AgentConfig
 from src.models import Direction, Market, OpportunityDecision, OrderBook, PriceSnapshot, Signal
 from src.risk.sizing import size_position
 from src.simulator.fees import execution_price, fee_amount, slippage_amount
+from src.simulator.lifecycle import classify_market_lifecycle
 from src.storage.sqlite import SQLiteStore
 from src.strategies.pair_cost_arbitrage import PairCostDecision
 
@@ -41,18 +42,56 @@ class PaperTradingEngine:
         now: datetime | None = None,
     ) -> OpportunityDecision:
         now = now or datetime.now(timezone.utc)
-        market_price = orderbook.best_ask or orderbook.midpoint
-        spread = orderbook.spread if orderbook.spread is not None else self.config.assumed_spread
-        if not market.window.is_tradeable(
+        lifecycle = classify_market_lifecycle(
+            market,
             now,
             min_seconds_before_end=self.config.min_seconds_before_end,
             max_seconds_after_start=self.config.max_seconds_after_start,
-        ):
-            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "outside timing window")
+        )
+        market_price = orderbook.best_ask or orderbook.midpoint
+        spread = orderbook.spread if orderbook.spread is not None else self.config.assumed_spread
+        if lifecycle.timing_bucket != "valid_window":
+            reason = {
+                "too_early": "market not started",
+                "too_late": "outside timing window",
+                "expired": "market expired",
+                "missing_expiry": "missing expiry",
+            }.get(lifecycle.timing_bucket, "outside timing window")
+            return OpportunityDecision(
+                market,
+                signal,
+                market_price,
+                spread,
+                "SKIP",
+                reason,
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
         if market_price is None:
-            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "missing market price")
+            return OpportunityDecision(
+                market,
+                signal,
+                market_price,
+                spread,
+                "SKIP",
+                "missing market price",
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
         if spread is not None and spread > self.config.max_spread:
-            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "spread above threshold")
+            return OpportunityDecision(
+                market,
+                signal,
+                market_price,
+                spread,
+                "SKIP",
+                "spread above threshold",
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
         estimated_edge = signal.probability - market_price - (spread or 0.0) / 2.0
         signal = Signal(
             asset=signal.asset,
@@ -62,10 +101,40 @@ class PaperTradingEngine:
             reason=signal.reason,
         )
         if estimated_edge < self.config.min_edge:
-            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "edge below threshold")
+            return OpportunityDecision(
+                market,
+                signal,
+                market_price,
+                spread,
+                "SKIP",
+                "edge below threshold",
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
         if self.random.random() < self.config.failed_fill_probability:
-            return OpportunityDecision(market, signal, market_price, spread, "SKIP", "simulated failed fill")
-        return OpportunityDecision(market, signal, market_price, spread, "TRADE", "paper trade accepted")
+            return OpportunityDecision(
+                market,
+                signal,
+                market_price,
+                spread,
+                "SKIP",
+                "simulated failed fill",
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
+        return OpportunityDecision(
+            market,
+            signal,
+            market_price,
+            spread,
+            "TRADE",
+            "paper trade accepted",
+            seconds_to_expiry=lifecycle.seconds_to_expiry,
+            lifecycle_status=lifecycle.status,
+            timing_bucket=lifecycle.timing_bucket,
+        )
 
     def enter(
         self,
@@ -141,6 +210,9 @@ class PaperTradingEngine:
                 spread=decision.combined_spread,
                 decision=decision.decision,
                 reason=decision.reason,
+                seconds_to_expiry=decision.seconds_to_expiry,
+                lifecycle_status=decision.lifecycle_status,
+                timing_bucket=decision.timing_bucket,
             ),
             run_id=self.run_id,
         )
@@ -234,11 +306,50 @@ class PaperTradingEngine:
                 exit_fee=exit_fee,
                 pnl=pnl,
                 result="WIN" if exit_value == 1.0 else "LOSS",
+                status="CLOSED_BY_EXPIRY",
+                close_mode="expiry-if-known",
             )
             self.store.set_balance(now, balance + proceeds - exit_fee, run_id=self.run_id)
             self.record_equity(now)
             closed += 1
         return closed
+
+    def close_position(
+        self,
+        *,
+        now: datetime,
+        trade: dict,
+        exit_underlying_price: float | None,
+        exit_price: float | None,
+        status: str,
+        close_mode: str,
+        settlement_note: str | None = None,
+    ) -> None:
+        balance = self.store.current_balance(default=self.config.starting_balance, run_id=self.run_id)
+        proceeds = 0.0
+        exit_fee = 0.0
+        pnl = None
+        result = None
+        if exit_price is not None:
+            proceeds = float(trade["shares"]) * exit_price
+            exit_fee = fee_amount(proceeds, self.config.fee_bps)
+            pnl = proceeds - exit_fee - float(trade["total_cost"])
+            result = "WIN" if pnl >= 0 else "LOSS"
+        self.store.close_trade(
+            now=now,
+            trade_id=str(trade["trade_id"]),
+            exit_underlying_price=exit_underlying_price,
+            exit_price=exit_price,
+            exit_fee=exit_fee if exit_price is not None else None,
+            pnl=pnl,
+            result=result,
+            status=status,
+            close_mode=close_mode,
+            settlement_note=settlement_note,
+        )
+        if exit_price is not None:
+            self.store.set_balance(now, balance + proceeds - exit_fee, run_id=self.run_id)
+        self.record_equity(now)
 
     def record_equity(self, now: datetime | None = None) -> None:
         now = now or datetime.now(timezone.utc)

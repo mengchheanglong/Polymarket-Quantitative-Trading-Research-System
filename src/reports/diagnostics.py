@@ -27,14 +27,14 @@ def build_diagnostics(
     lines.append(f"Strategies: {', '.join(strategies)}")
     lines.append(f"Config: {format_config_view(merged_config_view([row['notes'] for row in run_rows]))}")
 
-    overall = _aggregate_for_runs(store, run_rows)
+    overall = _aggregate_for_runs(store, run_rows, session_id=session_id)
     lines.extend(_section_lines("Overall", overall))
 
     if len(strategies) > 1:
         lines.append("By strategy:")
         for item in strategies:
             strategy_rows = [row for row in run_rows if str(row["strategy"]) == item]
-            lines.extend(_section_lines(item, _aggregate_for_runs(store, strategy_rows), indent="  "))
+            lines.extend(_section_lines(item, _aggregate_for_runs(store, strategy_rows, session_id=session_id), indent="  "))
 
     lines.append("Market-level diagnostics:")
     market_rows = overall["market_rows"]
@@ -61,7 +61,7 @@ def build_diagnostics(
     return "\n".join(lines)
 
 
-def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any]) -> dict[str, Any]:
+def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any], session_id: str | None = None) -> dict[str, Any]:
     run_ids = [str(row["run_id"]) for row in run_rows]
     placeholders = ",".join("?" for _ in run_ids)
     opportunity_rows = store.rows(
@@ -86,17 +86,19 @@ def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any]) -> dict[str, An
     )
     market_map = {
         row["slug"]: row
-        for row in store.market_audit_rows(source_filter=_single_value(run_rows, "data_source"))
+        for row in store.market_audit_rows(source_filter=_single_value(run_rows, "data_source"), session_id=session_id)
     }
     skip_rows = [row for row in opportunity_rows if str(row["decision"]) == "SKIP"]
     edge_values = [float(row["edge"] or 0.0) for row in opportunity_rows]
     spread_values = [float(row["spread"]) for row in opportunity_rows if row["spread"] is not None]
+    seconds_to_expiry_values = [float(row["seconds_to_expiry"]) for row in opportunity_rows if row["seconds_to_expiry"] is not None]
     pair_cost_values = [
         float(row["market_price"])
         for row in opportunity_rows
         if str(row["strategy"]) == "pair-cost" and row["market_price"] is not None
     ]
     skipped_by_reason = Counter(str(row["reason"]) for row in skip_rows)
+    timing_buckets = Counter(str(row["timing_bucket"] or "unknown") for row in opportunity_rows)
     markets_with_skips = Counter(str(row["market_slug"]) for row in skip_rows)
     run_configs = {str(row["run_id"]): parse_config_notes(row["notes"]) for row in run_rows}
     near_threshold = sum(1 for row in opportunity_rows if _is_near_threshold(row, run_configs.get(str(row["run_id"]), {})))
@@ -117,6 +119,10 @@ def _aggregate_for_runs(store: SQLiteStore, run_rows: list[Any]) -> dict[str, An
         "average_pair_cost": _safe_avg(pair_cost_values),
         "min_pair_cost": min(pair_cost_values, default=None),
         "max_pair_cost": max(pair_cost_values, default=None),
+        "average_seconds_to_expiry": _safe_avg(seconds_to_expiry_values),
+        "min_seconds_to_expiry": min(seconds_to_expiry_values, default=None),
+        "max_seconds_to_expiry": max(seconds_to_expiry_values, default=None),
+        "timing_buckets": dict(timing_buckets),
         "near_threshold": near_threshold,
         "markets_with_most_skips": markets_with_skips.most_common(5),
         "edge_distribution": _bucket_edges(edge_values),
@@ -144,6 +150,11 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
         f"{indent}pair_cost_stats=avg:{_fmt_float(values['average_pair_cost'])}, min:{_fmt_float(values['min_pair_cost'])}, "
         f"max:{_fmt_float(values['max_pair_cost'])}"
     )
+    lines.append(
+        f"{indent}seconds_to_expiry=avg:{_fmt_float(values['average_seconds_to_expiry'])}, min:{_fmt_float(values['min_seconds_to_expiry'])}, "
+        f"max:{_fmt_float(values['max_seconds_to_expiry'])}"
+    )
+    lines.append(f"{indent}timing_buckets={_fmt_map(values['timing_buckets'])}")
     lines.append(f"{indent}near_threshold={values['near_threshold']}")
     lines.append(f"{indent}markets_with_most_skips={_fmt_pairs(values['markets_with_most_skips'])}")
     lines.append(f"{indent}edge_distribution={_fmt_map(values['edge_distribution'])}")

@@ -30,6 +30,11 @@ class BacktestReport:
     max_equity_drawdown: float
     max_position_exposure: float
     average_edge: float
+    open_positions: int
+    unresolved_positions: int
+    settlement_unavailable: int
+    approximate_expiry_settlements: int
+    mark_to_market_settlements: int
     source_coverage: dict[str, int]
     quality_metrics: dict
 
@@ -54,13 +59,22 @@ class BacktestReport:
                 f"Accepted fake trades: {self.accepted_fake_trades}",
                 f"Skipped opportunities: {self.skipped_opportunities}",
                 f"Realized fake PnL: ${self.realized_fake_pnl:.2f}",
+                f"Open positions: {self.open_positions}",
+                f"Unresolved positions: {self.unresolved_positions}",
+                f"Settlement unavailable: {self.settlement_unavailable}",
+                f"Approximate expiry settlements: {self.approximate_expiry_settlements}",
+                f"Mark-to-market settlements: {self.mark_to_market_settlements}",
                 f"Win rate: {self.win_rate:.2%}",
                 f"Max equity drawdown: ${self.max_equity_drawdown:.2f}",
                 f"Max position exposure: ${self.max_position_exposure:.2f}",
                 f"Average edge: {self.average_edge:.4f}",
                 f"Source coverage: {_format_map(self.source_coverage)}",
                 f"Failed collection attempts: {self.quality_metrics['failed_collection_attempts']}",
-                f"Stale snapshots: {self.quality_metrics['stale_snapshots']}",
+                f"Total stale snapshots: {self.quality_metrics['total_stale_snapshots']}",
+                f"Stale exchange prices: {self.quality_metrics['stale_exchange_prices']}",
+                f"Stale orderbooks: {self.quality_metrics['stale_orderbooks']}",
+                f"Expired markets seen: {self.quality_metrics['expired_markets_seen']}",
+                f"Invalid timestamps: {self.quality_metrics['invalid_timestamps']}",
                 f"Missing orderbooks: {self.quality_metrics['missing_orderbooks']}",
                 f"Missing prices: {self.quality_metrics['missing_prices']}",
                 f"Wide spreads: {self.quality_metrics['wide_spreads']}",
@@ -137,6 +151,11 @@ def build_backtest_report(
         max_equity_drawdown=report.max_equity_drawdown,
         max_position_exposure=report.max_position_exposure,
         average_edge=report.average_edge,
+        open_positions=report.open_positions,
+        unresolved_positions=report.unresolved_positions,
+        settlement_unavailable=report.settlement_unavailable,
+        approximate_expiry_settlements=report.approximate_expiry_settlements,
+        mark_to_market_settlements=report.mark_to_market_settlements,
         source_coverage=quality["source_coverage"],
         quality_metrics=quality,
     )
@@ -180,7 +199,12 @@ def _empty_report(source_filter: str, starting_balance: float) -> Report:
         total_equity=starting_balance,
         max_equity_drawdown=0.0,
         max_position_exposure=0.0,
+        open_positions=0,
         closed_trades=0,
+        unresolved_positions=0,
+        settlement_unavailable=0,
+        approximate_expiry_settlements=0,
+        mark_to_market_settlements=0,
         skipped_trades=0,
         win_rate=0.0,
         average_edge=0.0,

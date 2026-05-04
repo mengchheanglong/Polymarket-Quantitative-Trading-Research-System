@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS opportunities (
     spread REAL,
     decision TEXT NOT NULL,
     reason TEXT NOT NULL,
+    seconds_to_expiry REAL,
+    lifecycle_status TEXT,
+    timing_bucket TEXT,
     is_mock INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trades (
@@ -43,6 +46,8 @@ CREATE TABLE IF NOT EXISTS trades (
     title TEXT NOT NULL,
     asset TEXT NOT NULL,
     direction TEXT NOT NULL,
+    token_id TEXT,
+    window_start TEXT,
     window_end TEXT NOT NULL,
     entry_price REAL NOT NULL,
     shares REAL NOT NULL,
@@ -57,6 +62,8 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl REAL,
     result TEXT,
     status TEXT NOT NULL,
+    close_mode TEXT,
+    settlement_note TEXT,
     is_mock INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bankroll (
@@ -243,6 +250,23 @@ class SQLiteStore:
             cols = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             if "session_id" not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
+        opportunities_cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(opportunities)")}
+        for column, ddl in (
+            ("seconds_to_expiry", "ALTER TABLE opportunities ADD COLUMN seconds_to_expiry REAL"),
+            ("lifecycle_status", "ALTER TABLE opportunities ADD COLUMN lifecycle_status TEXT"),
+            ("timing_bucket", "ALTER TABLE opportunities ADD COLUMN timing_bucket TEXT"),
+        ):
+            if column not in opportunities_cols:
+                self.conn.execute(ddl)
+        trades_cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(trades)")}
+        for column, ddl in (
+            ("token_id", "ALTER TABLE trades ADD COLUMN token_id TEXT"),
+            ("window_start", "ALTER TABLE trades ADD COLUMN window_start TEXT"),
+            ("close_mode", "ALTER TABLE trades ADD COLUMN close_mode TEXT"),
+            ("settlement_note", "ALTER TABLE trades ADD COLUMN settlement_note TEXT"),
+        ):
+            if column not in trades_cols:
+                self.conn.execute(ddl)
 
     def close(self) -> None:
         self.conn.close()
@@ -552,7 +576,7 @@ class SQLiteStore:
         ending_balance = self.current_balance(default=starting_balance, run_id=run_id)
         realized_pnl = sum(
             float(row["pnl"] or 0.0)
-            for row in self.rows("SELECT pnl FROM trades WHERE status = 'CLOSED' AND run_id = ?", (run_id,))
+            for row in self.rows("SELECT pnl FROM trades WHERE pnl IS NOT NULL AND run_id = ?", (run_id,))
         )
         equity_values = [
             starting_balance,
@@ -682,8 +706,8 @@ class SQLiteStore:
             """
             INSERT INTO opportunities
                 (run_id, observed_at, market_slug, asset, direction, probability, edge, market_price,
-                 spread, decision, reason, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 spread, decision, reason, seconds_to_expiry, lifecycle_status, timing_bucket, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -697,6 +721,9 @@ class SQLiteStore:
                 decision.spread,
                 decision.decision,
                 decision.reason,
+                decision.seconds_to_expiry,
+                decision.lifecycle_status,
+                decision.timing_bucket,
                 int(decision.market.is_mock),
             ),
         )
@@ -706,10 +733,10 @@ class SQLiteStore:
         self.conn.execute(
             """
             INSERT INTO trades
-                (trade_id, run_id, opened_at, market_slug, title, asset, direction, window_end,
+                (trade_id, run_id, opened_at, market_slug, title, asset, direction, token_id, window_start, window_end,
                  entry_price, shares, notional, entry_fee, slippage_cost, total_cost,
-                 entry_underlying_price, status, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                 entry_underlying_price, status, close_mode, settlement_note, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, ?)
             """,
             (
                 fill.trade_id,
@@ -719,6 +746,8 @@ class SQLiteStore:
                 fill.market.title,
                 fill.market.asset.value,
                 fill.direction.value,
+                fill.market.token_for(fill.direction),
+                _iso(fill.market.window.start),
                 _iso(fill.market.window.end),
                 fill.entry_price,
                 fill.shares,
@@ -736,20 +765,24 @@ class SQLiteStore:
         self,
         now: datetime,
         trade_id: str,
-        exit_underlying_price: float,
-        exit_price: float,
-        exit_fee: float,
-        pnl: float,
-        result: str,
+        *,
+        exit_underlying_price: float | None,
+        exit_price: float | None,
+        exit_fee: float | None,
+        pnl: float | None,
+        result: str | None,
+        status: str,
+        close_mode: str,
+        settlement_note: str | None = None,
     ) -> None:
         self.conn.execute(
             """
             UPDATE trades
             SET closed_at = ?, exit_underlying_price = ?, exit_price = ?, exit_fee = ?,
-                pnl = ?, result = ?, status = 'CLOSED'
+                pnl = ?, result = ?, status = ?, close_mode = ?, settlement_note = ?
             WHERE trade_id = ?
             """,
-            (_iso(now), exit_underlying_price, exit_price, exit_fee, pnl, result, trade_id),
+            (_iso(now), exit_underlying_price, exit_price, exit_fee, pnl, result, status, close_mode, settlement_note, trade_id),
         )
         self.conn.commit()
 
@@ -810,6 +843,71 @@ class SQLiteStore:
                 "SELECT * FROM trades WHERE run_id = ? ORDER BY opened_at, trade_id",
                 (run_id,),
             )
+        )
+
+    def latest_price(
+        self,
+        asset: str,
+        *,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
+    ) -> PriceSnapshot | None:
+        prices = self.latest_prices(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
+        return prices.get(asset)
+
+    def nearest_price(
+        self,
+        asset: str,
+        target: datetime,
+        *,
+        max_delta_seconds: int = 300,
+        source_filter: str | None = None,
+        session_id: str | None = None,
+    ) -> PriceSnapshot | None:
+        clauses = ["asset = ?"]
+        params: list[Any] = [asset]
+        source_clause, source_params = _source_sql("source", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        rows = self.rows(
+            f"""
+            SELECT asset, price, observed_at, source
+            FROM price_snapshots
+            WHERE {' AND '.join(clauses)}
+            ORDER BY observed_at DESC, id DESC
+            """,
+            tuple(params),
+        )
+        if not rows:
+            return None
+        candidate_rows = []
+        for row in rows:
+            try:
+                observed_at = _from_iso(str(row["observed_at"]))
+            except ValueError:
+                continue
+            delta = abs((observed_at - target).total_seconds())
+            if delta <= max_delta_seconds:
+                candidate_rows.append((delta, observed_at, row))
+        if not candidate_rows:
+            return None
+        _, _, row = min(candidate_rows, key=lambda item: (item[0], -item[1].timestamp()))
+        return PriceSnapshot(
+            asset=asset_enum(str(row["asset"])),
+            price=float(row["price"]),
+            timestamp=_from_iso(str(row["observed_at"])),
+            source=str(row["source"]),
         )
 
     def skipped_opportunity_rows(self, run_id: str | None = None) -> list[sqlite3.Row]:
@@ -963,12 +1061,14 @@ class SQLiteStore:
                     down_token_id=str(row["down_token_id"]),
                     source_url=str(row["source_url"]),
                     is_mock=bool(row["is_mock"]),
+                    observed_at=_from_iso(str(row["first_seen"])),
+                    latest_observed_at=_from_iso(str(row["latest_seen"])),
                 )
                 for row in rows
             ]
         query = """
             SELECT market_id, market_slug, title, asset, window_start, window_end,
-                   up_token_id, down_token_id, source_url, is_mock
+                   up_token_id, down_token_id, source_url, is_mock, collected_at
             FROM collected_markets
         """
         clauses: list[str] = []
@@ -988,21 +1088,23 @@ class SQLiteStore:
         query += " ORDER BY window_end"
         rows = self.rows(query, tuple(params))
         return [
-            Market(
-                market_id=str(row["market_id"]),
-                slug=str(row["market_slug"]),
-                title=str(row["title"]),
+                Market(
+                    market_id=str(row["market_id"]),
+                    slug=str(row["market_slug"]),
+                    title=str(row["title"]),
                 asset=asset_enum(str(row["asset"])),
                 window=TimingWindow(
                     start=_from_iso(str(row["window_start"])),
                     end=_from_iso(str(row["window_end"])),
                 ),
                 up_token_id=str(row["up_token_id"]),
-                down_token_id=str(row["down_token_id"]),
-                source_url=str(row["source_url"]),
-                is_mock=bool(row["is_mock"]),
-            )
-            for row in rows
+                    down_token_id=str(row["down_token_id"]),
+                    source_url=str(row["source_url"]),
+                    is_mock=bool(row["is_mock"]),
+                    observed_at=_from_iso(str(row["collected_at"])),
+                    latest_observed_at=_from_iso(str(row["collected_at"])),
+                )
+                for row in rows
         ]
 
     def collected_orderbook(
@@ -1031,7 +1133,7 @@ class SQLiteStore:
                 params.append(_iso(until))
             row = self.conn.execute(
                 f"""
-                SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price
+                SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price, observed_at, source_name
                 FROM collected_orderbook_history
                 WHERE {' AND '.join(clauses)}
                 ORDER BY observed_at DESC, id DESC
@@ -1051,7 +1153,7 @@ class SQLiteStore:
             params.append(_iso(since))
         row = self.conn.execute(
             f"""
-            SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price
+            SELECT token_id, bid_price, bid_size, ask_price, ask_size, last_trade_price, collected_at AS observed_at, source_name
             FROM collected_orderbooks
             WHERE {' AND '.join(clauses)}
             """,
@@ -1168,7 +1270,11 @@ class SQLiteStore:
             "markets_seen": [str(row["market_slug"]) for row in market_rows],
             "missing_prices": quality["missing_prices"],
             "missing_orderbooks": quality["missing_orderbooks"],
-            "stale_snapshots": quality["stale_snapshots"],
+            "stale_snapshots": quality["total_stale_snapshots"],
+            "stale_exchange_prices": quality["stale_exchange_prices"],
+            "stale_orderbooks": quality["stale_orderbooks"],
+            "expired_markets_seen": quality["expired_markets_seen"],
+            "invalid_timestamps": quality["invalid_timestamps"],
             "source_coverage": quality["source_coverage"],
             "demo_included": any(_is_demo_source(source) for source in actual_sources),
             "public_included": any(not _is_demo_source(source) for source in actual_sources),
@@ -1183,14 +1289,14 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
         raw_rows = self.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         failed = sum(1 for row in raw_rows if row["status"] != "ok")
-        stale = 0
+        invalid_timestamps = 0
         for row in raw_rows:
-            observed = _from_iso(str(row["observed_at"]))
-            if (now - observed).total_seconds() > stale_seconds:
-                stale += 1
+            try:
+                _from_iso(str(row["observed_at"]))
+            except ValueError:
+                invalid_timestamps += 1
         latest_prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
         missing_prices = sum(1 for asset in ("BTC", "ETH") if asset not in latest_prices)
         markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
@@ -1198,6 +1304,9 @@ class SQLiteStore:
         missing_orderbooks = 0
         wide_spreads = 0
         low_liquidity = 0
+        stale_exchange_prices = 0
+        stale_orderbooks = 0
+        expired_markets_seen = 0
         if source_filter == "public":
             directional = [
                 row
@@ -1206,17 +1315,39 @@ class SQLiteStore:
             ]
             missing_orderbooks = sum(1 for row in directional if str(row["orderbook_status"]) != "FOUND")
         for market in markets:
+            observed_at = market.observed_at or market.window.start
+            if observed_at >= market.window.end:
+                expired_markets_seen += 1
+            price = self.latest_price(
+                market.asset.value,
+                source_filter=source_filter,
+                until=observed_at,
+                session_id=session_id,
+            )
+            if price is None or (observed_at - price.timestamp).total_seconds() > stale_seconds:
+                stale_exchange_prices += 1
+            market_has_stale_book = False
             for token_id in (market.up_token_id, market.down_token_id):
-                book = self.collected_orderbook(token_id, source_filter=source_filter, since=since, until=until, session_id=session_id)
+                book = self.collected_orderbook(
+                    token_id,
+                    source_filter=source_filter,
+                    until=observed_at,
+                    session_id=session_id,
+                )
                 if book is None:
                     if source_filter != "public":
                         missing_orderbooks += 1
+                    market_has_stale_book = True
                     continue
                 if book.spread is not None and book.spread > wide_spread:
                     wide_spreads += 1
                 total_size = sum(level.size for level in book.bids) + sum(level.size for level in book.asks)
                 if total_size < 10:
                     low_liquidity += 1
+                if book.observed_at is None or (observed_at - book.observed_at).total_seconds() > stale_seconds:
+                    market_has_stale_book = True
+            if market_has_stale_book:
+                stale_orderbooks += 1
         if source_filter in ("demo", "public"):
             skip_rows = self.rows(
                 """
@@ -1246,7 +1377,12 @@ class SQLiteStore:
         return {
             "snapshots_collected": len(raw_rows),
             "failed_collection_attempts": failed,
-            "stale_snapshots": stale,
+            "stale_exchange_prices": stale_exchange_prices,
+            "stale_orderbooks": stale_orderbooks,
+            "expired_markets_seen": expired_markets_seen,
+            "invalid_timestamps": invalid_timestamps,
+            "total_stale_snapshots": stale_exchange_prices + stale_orderbooks + expired_markets_seen + invalid_timestamps,
+            "stale_snapshots": stale_exchange_prices + stale_orderbooks + expired_markets_seen + invalid_timestamps,
             "missing_orderbooks": missing_orderbooks,
             "missing_prices": missing_prices,
             "wide_spreads": wide_spreads,
@@ -1595,6 +1731,8 @@ def _orderbook_from_row(row: sqlite3.Row | None) -> OrderBook | None:
         bids=bids,
         asks=asks,
         last_trade_price=float(row["last_trade_price"]) if row["last_trade_price"] is not None else None,
+        observed_at=_from_iso(str(row["observed_at"])) if row["observed_at"] is not None else None,
+        source=str(row["source_name"]) if row["source_name"] is not None else None,
     )
 
 

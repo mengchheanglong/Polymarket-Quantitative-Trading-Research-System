@@ -129,6 +129,8 @@ python -m src.main replay --strategy momentum --source demo
 python -m src.main replay --strategy momentum --source public
 python -m src.main replay --strategy pair-cost --source public
 python -m src.main replay --strategy momentum --source public --session-id <session_id>
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode mark-to-market
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode approximate-expiry
 ```
 
 Summarize replay/backtest and data quality:
@@ -161,6 +163,8 @@ python -m src.main diagnostics --source public
 python -m src.main diagnostics --strategy momentum --source public
 python -m src.main diagnostics --strategy pair-cost --source public
 ```
+
+Replay diagnostics now include timing buckets and seconds-to-expiry summaries. Reports and ledgers also distinguish open, closed, unresolved, and settlement-unavailable paper positions.
 
 Run a research-only threshold sweep on stored snapshots:
 
@@ -228,3 +232,4 @@ Public discovery process:
 - Observe sessions track session ids, cycle counts, and partial-session completion safely.
 - Public CLOB orderbook capture through public market-data endpoints only.
 - Diagnostics and sweeps use stored snapshots only. They never call external APIs.
+- `mark-to-market` and `approximate-expiry` close modes are paper-only research tools. They do not use authenticated APIs and do not imply real settlement certainty.

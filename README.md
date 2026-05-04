@@ -91,6 +91,8 @@ The backtest report includes snapshot count, markets seen, opportunities, accept
 
 Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
 
+Phase 10 tightens market lifecycle and stale-data handling. Stale data is no longer measured against the current wall clock. Reports now break it into stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, and total stale snapshot issues relative to the replay/session window.
+
 ## Diagnostics And Threshold Sweeps
 
 Phase 8 adds paper-only diagnostics and threshold sweeps:
@@ -105,6 +107,8 @@ python -m src.main sweep --strategy pair-cost --source public
 
 Diagnostics summarize total opportunities, accepted trades, skipped opportunities, skipped-by-reason counts, edge and spread stats, pair-cost stats, edge-distribution buckets, pair-cost buckets, near-threshold opportunities, and market-level diagnostics.
 
+Timing diagnostics now include seconds-to-expiry and timing buckets such as `too_early`, `valid_window`, `too_late`, `expired`, and `missing_expiry`.
+
 Reports now show the active paper thresholds and assumptions, including `MIN_EDGE`, `MAX_SPREAD`, `PAIR_COST_THRESHOLD`, fees, slippage, position sizing, and failed-fill assumptions.
 
 Accepted `0` trades can be the correct result. If diagnostics show negative edge, wide spreads, or pair cost above threshold, the safe paper engine should keep skipping instead of forcing bad simulated entries.
@@ -112,6 +116,25 @@ Accepted `0` trades can be the correct result. If diagnostics show negative edge
 Threshold sweeps are research only. They replay stored snapshots with temporary paper-only overrides and do not modify the default config, do not call external APIs, and do not prove live profitability even if a row looks better than the default.
 
 Phase 9 adds long-running research sessions. Replay, diagnostics, sweeps, compare, backtest reporting, and export can all be tied back to one observed public-data session instead of mixing later data into the same analysis window.
+
+Phase 10 also adds paper position lifecycle handling:
+
+- `OPEN`
+- `CLOSED_BY_MARK_TO_MARKET`
+- `CLOSED_BY_EXPIRY`
+- `EXPIRED_UNRESOLVED`
+- `SETTLEMENT_UNAVAILABLE`
+
+Replay close modes are paper-only:
+
+```powershell
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode none
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode mark-to-market
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode expiry-if-known
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode approximate-expiry
+```
+
+`mark-to-market` uses the latest stored midpoint before expiry or session end. `approximate-expiry` uses stored exchange prices near market start and expiry to infer a research-only settlement. It may be wrong and is not proof of live profitability. Unresolved or settlement-unavailable positions are not counted as fake profits.
 
 ## Observe And Dataset Building
 

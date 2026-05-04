@@ -4,6 +4,7 @@ import argparse
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from src.collectors.mock_markets import MockMarketSource
 from src.collectors.polymarket import PolymarketPublicCollector, _candidate_to_market
 from src.config import AgentConfig, load_config
 from src.http_client import HttpError
-from src.models import Asset, OpportunityDecision, OrderBook, Signal
+from src.models import Asset, Direction, OpportunityDecision, OrderBook, Signal
 from src.reports.backtest import build_backtest_report
 from src.reports.compare import build_strategy_comparison
 from src.reports.dataset import build_dataset_summary
@@ -21,7 +22,8 @@ from src.reports.ledger import build_trade_ledger
 from src.reports.summary import build_report
 from src.reports.sweep import SweepRow, build_sweep_report
 from src.safety import SafetyError, enforce_paper_only
-from src.simulator.engine import PaperTradingEngine
+from src.simulator.engine import PaperTradingEngine, resolve_binary_value
+from src.simulator.lifecycle import classify_market_lifecycle
 from src.storage.export import export_csv
 from src.storage.sqlite import SQLiteStore
 from src.strategies.pair_cost_arbitrage import PairCostArbitrageStrategy
@@ -73,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     replay_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
     replay_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    replay_parser.add_argument(
+        "--close-mode",
+        choices=("none", "mark-to-market", "expiry-if-known", "approximate-expiry"),
+        default=None,
+        help="Paper-only replay close handling.",
+    )
     replay_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
     backtest_parser.add_argument(
@@ -147,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _replace_demo_flag(config, True)
     if getattr(args, "strategy", None):
         config = _replace_strategy(config, args.strategy)
+    if getattr(args, "close_mode", None):
+        config = _replace_close_mode(config, args.close_mode)
 
     try:
         enforce_paper_only(config.dry_run, config.execution_mode)
@@ -485,7 +495,17 @@ def session_report(config: AgentConfig, args) -> int:
         print(f"BTC/ETH markets found: {found}")
         print(f"Orderbooks captured: {orderbooks}")
         print(f"Readiness verdict: {readiness_result['verdict']}")
-        print(f"Data quality: failed={quality['failed_collection_attempts']}, stale={quality['stale_snapshots']}, missing_orderbooks={quality['missing_orderbooks']}, missing_prices={quality['missing_prices']}")
+        print(
+            "Data quality: "
+            f"failed={quality['failed_collection_attempts']}, "
+            f"total_stale={quality['total_stale_snapshots']}, "
+            f"stale_exchange_prices={quality['stale_exchange_prices']}, "
+            f"stale_orderbooks={quality['stale_orderbooks']}, "
+            f"expired_markets_seen={quality['expired_markets_seen']}, "
+            f"invalid_timestamps={quality['invalid_timestamps']}, "
+            f"missing_orderbooks={quality['missing_orderbooks']}, "
+            f"missing_prices={quality['missing_prices']}"
+        )
         print(f"Market discovery summary: accepted={found}, rejected={len(markets) - found}")
         print(f"Recommended next command: {_recommended_next_command(readiness_result['verdict'], session_id)}")
     finally:
@@ -537,6 +557,17 @@ def research_report(config: AgentConfig, args) -> int:
                     ]
                 )
             )
+        print(
+            build_backtest_report(
+                store,
+                config.starting_balance,
+                store.get_state("last_replay_strategy") or config.strategy,
+                source_filter="public",
+                since=since,
+                until=until,
+                session_id=session_id,
+            ).as_text()
+        )
         print(build_strategy_comparison(store, source_filter="public", session_id=session_id))
         print(build_diagnostics(store, strategy=None, source_filter="public", session_id=session_id))
     finally:
@@ -656,6 +687,7 @@ def replay(config: AgentConfig, args) -> int:
             f"Replay complete. Strategy: {config.strategy}; accepted fake trades: {outcome['accepted']}; "
             f"skipped: {outcome['skipped']}; closed: {outcome['closed']}."
         )
+        print(f"Close mode: {config.close_mode}")
         print(f"Run ID: {outcome['run_id']}")
     finally:
         store.close()
@@ -876,6 +908,17 @@ def readiness(config: AgentConfig, args) -> int:
         print(f"Exchange price snapshots: {result['exchange_price_count']}")
         print(f"Wide spreads: {result['wide_spreads']}")
         print(f"Missing orderbooks: {result['missing_orderbooks']}")
+        quality = store.data_quality_metrics(
+            source_filter=source_filter or "all",
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
+        print(f"Stale exchange prices: {quality['stale_exchange_prices']}")
+        print(f"Stale orderbooks: {quality['stale_orderbooks']}")
+        print(f"Expired markets seen: {quality['expired_markets_seen']}")
+        print(f"Invalid timestamps: {quality['invalid_timestamps']}")
+        print(f"Total stale snapshots: {quality['total_stale_snapshots']}")
     finally:
         store.close()
     return 0
@@ -1023,6 +1066,350 @@ def _run_pair_cost(
     return accepted, skipped
 
 
+def _run_replay_momentum(
+    config: AgentConfig,
+    engine: PaperTradingEngine,
+    data_store: SQLiteStore,
+    markets,
+    *,
+    source_filter: str | None,
+    session_id: str | None,
+) -> tuple[int, int]:
+    strategy = MomentumUpDownStrategy()
+    accepted = 0
+    skipped = 0
+    for market in markets:
+        observed_at = market.observed_at or market.window.start
+        price_snapshot = data_store.latest_price(
+            market.asset.value,
+            source_filter=source_filter,
+            until=observed_at,
+            session_id=session_id,
+        )
+        if price_snapshot is None:
+            engine.store.log_opportunity(
+                observed_at,
+                OpportunityDecision(
+                    market=market,
+                    signal=Signal(asset=market.asset, direction=Direction.UP, probability=0.5, edge=0.0, reason="missing underlying price"),
+                    market_price=None,
+                    spread=None,
+                    decision="SKIP",
+                    reason="missing underlying price",
+                ),
+                run_id=engine.run_id,
+            )
+            skipped += 1
+            continue
+        signal = _signal_for_at(strategy, data_store, market.asset, observed_at, source_filter, session_id)
+        orderbook = data_store.collected_orderbook(
+            market.token_for(signal.direction),
+            source_filter=source_filter,
+            until=observed_at,
+            session_id=session_id,
+        )
+        if orderbook is None:
+            lifecycle = classify_market_lifecycle(
+                market,
+                observed_at,
+                min_seconds_before_end=config.min_seconds_before_end,
+                max_seconds_after_start=config.max_seconds_after_start,
+            )
+            decision = OpportunityDecision(
+                market=market,
+                signal=signal,
+                market_price=None,
+                spread=None,
+                decision="SKIP",
+                reason="public orderbook unavailable",
+                seconds_to_expiry=lifecycle.seconds_to_expiry,
+                lifecycle_status=lifecycle.status,
+                timing_bucket=lifecycle.timing_bucket,
+            )
+            engine.store.log_opportunity(observed_at, decision, run_id=engine.run_id)
+            skipped += 1
+            continue
+
+        decision = engine.evaluate(market, signal, orderbook, now=observed_at)
+        fill = engine.enter(decision, orderbook, price_snapshot, now=observed_at)
+        if fill:
+            accepted += 1
+        else:
+            skipped += 1
+    return accepted, skipped
+
+
+def _run_replay_pair_cost(
+    config: AgentConfig,
+    engine: PaperTradingEngine,
+    data_store: SQLiteStore,
+    markets,
+    *,
+    source_filter: str | None,
+    session_id: str | None,
+) -> tuple[int, int]:
+    strategy = PairCostArbitrageStrategy(
+        threshold=config.pair_cost_threshold,
+        max_spread=config.max_spread,
+        slippage_bps=config.slippage_bps,
+        failed_second_leg_probability=config.pair_cost_failed_second_leg_probability,
+        random_seed=config.random_seed,
+    )
+    accepted = 0
+    skipped = 0
+    for market in markets:
+        observed_at = market.observed_at or market.window.start
+        price_snapshot = data_store.latest_price(
+            market.asset.value,
+            source_filter=source_filter,
+            until=observed_at,
+            session_id=session_id,
+        )
+        if price_snapshot is None:
+            signal = Signal(asset=market.asset, direction=Direction.UP, probability=1.0, edge=0.0, reason="missing underlying price")
+            engine.store.log_opportunity(
+                observed_at,
+                OpportunityDecision(
+                    market=market,
+                    signal=signal,
+                    market_price=None,
+                    spread=None,
+                    decision="SKIP",
+                    reason="missing underlying price",
+                ),
+                run_id=engine.run_id,
+            )
+            skipped += 1
+            continue
+        lifecycle = classify_market_lifecycle(
+            market,
+            observed_at,
+            min_seconds_before_end=config.min_seconds_before_end,
+            max_seconds_after_start=config.max_seconds_after_start,
+        )
+        if lifecycle.timing_bucket != "valid_window":
+            signal = Signal(asset=market.asset, direction=Direction.UP, probability=1.0, edge=0.0, reason="pair-cost timing check")
+            reason = {
+                "too_early": "market not started",
+                "too_late": "outside timing window",
+                "expired": "market expired",
+                "missing_expiry": "missing expiry",
+            }.get(lifecycle.timing_bucket, "outside timing window")
+            engine.store.log_opportunity(
+                observed_at,
+                OpportunityDecision(
+                    market=market,
+                    signal=signal,
+                    market_price=None,
+                    spread=None,
+                    decision="SKIP",
+                    reason=reason,
+                    seconds_to_expiry=lifecycle.seconds_to_expiry,
+                    lifecycle_status=lifecycle.status,
+                    timing_bucket=lifecycle.timing_bucket,
+                ),
+                run_id=engine.run_id,
+            )
+            skipped += 1
+            continue
+        decision = strategy.evaluate(
+            market,
+            data_store.collected_orderbook(
+                market.up_token_id,
+                source_filter=source_filter,
+                until=observed_at,
+                session_id=session_id,
+            ),
+            data_store.collected_orderbook(
+                market.down_token_id,
+                source_filter=source_filter,
+                until=observed_at,
+                session_id=session_id,
+            ),
+        )
+        decision = replace(
+            decision,
+            seconds_to_expiry=lifecycle.seconds_to_expiry,
+            lifecycle_status=lifecycle.status,
+            timing_bucket=lifecycle.timing_bucket,
+        )
+        fills = engine.enter_pair(decision, price_snapshot, now=observed_at)
+        if fills:
+            accepted += len(fills)
+        else:
+            skipped += 1
+    return accepted, skipped
+
+
+def _close_replay_positions(
+    config: AgentConfig,
+    engine: PaperTradingEngine,
+    data_store: SQLiteStore,
+    *,
+    close_mode: str,
+    replay_end: datetime,
+    source_filter: str | None,
+    session_id: str | None,
+    settlement_prices,
+) -> dict[str, int]:
+    status_counts = {
+        "closed_by_mark_to_market": 0,
+        "closed_by_expiry": 0,
+        "expired_unresolved": 0,
+        "settlement_unavailable": 0,
+        "open": 0,
+    }
+    for trade in engine.store.open_trades(run_id=engine.run_id):
+        window_end = _trade_time(trade["window_end"]) or replay_end
+        window_start = _trade_time(trade["window_start"]) or _trade_time(trade["opened_at"]) or window_end
+        close_at = min(window_end, replay_end)
+        if close_mode == "mark-to-market":
+            book = data_store.collected_orderbook(
+                str(trade["token_id"]),
+                source_filter=source_filter,
+                until=close_at,
+                session_id=session_id,
+            )
+            midpoint = book.midpoint if book is not None else None
+            if midpoint is None:
+                status = "SETTLEMENT_UNAVAILABLE" if replay_end >= window_end else "OPEN"
+                if status == "OPEN":
+                    status_counts["open"] += 1
+                    continue
+                engine.close_position(
+                    now=close_at,
+                    trade=trade,
+                    exit_underlying_price=None,
+                    exit_price=None,
+                    status=status,
+                    close_mode=close_mode,
+                    settlement_note="mark-to-market midpoint unavailable",
+                )
+                status_counts["settlement_unavailable"] += 1
+                continue
+            underlying = data_store.latest_price(
+                str(trade["asset"]),
+                source_filter=source_filter,
+                until=close_at,
+                session_id=session_id,
+            )
+            engine.close_position(
+                now=close_at,
+                trade=trade,
+                exit_underlying_price=underlying.price if underlying else None,
+                exit_price=midpoint,
+                status="CLOSED_BY_MARK_TO_MARKET",
+                close_mode=close_mode,
+                settlement_note="latest midpoint before expiry/session end",
+            )
+            status_counts["closed_by_mark_to_market"] += 1
+            continue
+
+        if replay_end < window_end:
+            status_counts["open"] += 1
+            continue
+
+        if close_mode == "approximate-expiry":
+            start_price = data_store.nearest_price(
+                str(trade["asset"]),
+                window_start,
+                max_delta_seconds=60,
+                source_filter=source_filter,
+                session_id=session_id,
+            )
+            end_price = data_store.nearest_price(
+                str(trade["asset"]),
+                window_end,
+                max_delta_seconds=60,
+                source_filter=source_filter,
+                session_id=session_id,
+            )
+            if start_price is None or end_price is None:
+                engine.close_position(
+                    now=window_end,
+                    trade=trade,
+                    exit_underlying_price=end_price.price if end_price else None,
+                    exit_price=None,
+                    status="SETTLEMENT_UNAVAILABLE",
+                    close_mode=close_mode,
+                    settlement_note="approximate expiry prices unavailable",
+                )
+                status_counts["settlement_unavailable"] += 1
+                continue
+            exit_value = resolve_binary_value(
+                direction=Direction(str(trade["direction"])),
+                entry_underlying_price=start_price.price,
+                exit_underlying_price=end_price.price,
+            )
+            engine.close_position(
+                now=window_end,
+                trade=trade,
+                exit_underlying_price=end_price.price,
+                exit_price=exit_value,
+                status="CLOSED_BY_EXPIRY",
+                close_mode=close_mode,
+                settlement_note="approximate expiry from stored exchange prices",
+            )
+            status_counts["closed_by_expiry"] += 1
+            continue
+
+        settlement_price = settlement_prices.get(str(trade["asset"])) if close_mode == "expiry-if-known" else None
+        if settlement_price is None and close_mode == "expiry-if-known":
+            engine.close_position(
+                now=window_end,
+                trade=trade,
+                exit_underlying_price=None,
+                exit_price=None,
+                status="SETTLEMENT_UNAVAILABLE",
+                close_mode=close_mode,
+                settlement_note="no stored settlement price available",
+            )
+            status_counts["settlement_unavailable"] += 1
+            continue
+
+        if close_mode == "none":
+            engine.close_position(
+                now=window_end,
+                trade=trade,
+                exit_underlying_price=None,
+                exit_price=None,
+                status="EXPIRED_UNRESOLVED",
+                close_mode=close_mode,
+                settlement_note="market expired with no close mode",
+            )
+            status_counts["expired_unresolved"] += 1
+            continue
+
+        if settlement_price is None:
+            engine.close_position(
+                now=window_end,
+                trade=trade,
+                exit_underlying_price=None,
+                exit_price=None,
+                status="EXPIRED_UNRESOLVED",
+                close_mode=close_mode,
+                settlement_note="expiry settlement unavailable",
+            )
+            status_counts["expired_unresolved"] += 1
+            continue
+        exit_value = resolve_binary_value(
+            direction=Direction(str(trade["direction"])),
+            entry_underlying_price=float(trade["entry_underlying_price"]),
+            exit_underlying_price=settlement_price.price,
+        )
+        engine.close_position(
+            now=window_end,
+            trade=trade,
+            exit_underlying_price=settlement_price.price,
+            exit_price=exit_value,
+            status="CLOSED_BY_EXPIRY",
+            close_mode=close_mode,
+            settlement_note="settled from stored expiry reference price",
+        )
+        status_counts["closed_by_expiry"] += 1
+    return status_counts
+
+
 def _simulate_replay(
     config: AgentConfig,
     *,
@@ -1087,6 +1474,7 @@ def _simulate_replay(
             "message": "Replay cannot run pair-cost: missing stored orderbooks for " + ", ".join(missing_books[:5]),
         }
 
+    replay_end = until or _replay_end_time(data_store, source_filter=source_filter, since=since, until=until, session_id=session_id) or now
     run_id = result_store.start_run(
         strategy=config.strategy,
         mode=mode,
@@ -1095,29 +1483,61 @@ def _simulate_replay(
         now=now,
         notes=(
             f"{_config_notes(config)}; source_filter={source_filter or 'all'}; "
-            f"since={since_label or 'none'}; until={until.isoformat() if until else 'none'}"
+            f"since={since_label or 'none'}; until={until.isoformat() if until else 'none'}; close_mode={config.close_mode}"
         ),
         session_id=session_id,
     )
     engine = PaperTradingEngine(config, result_store, run_id=run_id)
     engine.record_equity(now)
-    if config.strategy == "pair-cost":
-        accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
-    else:
-        accepted, skipped = _run_momentum(
+    if mode in {"replay", "sweep"}:
+        if config.strategy == "pair-cost":
+            accepted, skipped = _run_replay_pair_cost(
+                config,
+                engine,
+                data_store,
+                markets,
+                source_filter=source_filter,
+                session_id=session_id,
+            )
+        else:
+            accepted, skipped = _run_replay_momentum(
+                config,
+                engine,
+                data_store,
+                markets,
+                source_filter=source_filter,
+                session_id=session_id,
+            )
+        close_counts = _close_replay_positions(
+            config,
             engine,
-            markets,
-            orderbook_source,
-            candle_source,
-            current_prices,
-            now,
+            data_store,
+            close_mode=config.close_mode,
+            replay_end=replay_end,
+            source_filter=source_filter,
+            session_id=session_id,
+            settlement_prices=settlement_prices,
         )
-    closed = 0
-    finished_at = now
-    if settlement_prices:
-        settlement_now = max(market.window.end for market in markets)
-        closed = engine.close_expired(settlement_prices, now=settlement_now)
-        finished_at = settlement_now
+        closed = close_counts["closed_by_expiry"] + close_counts["closed_by_mark_to_market"]
+        finished_at = replay_end
+    else:
+        if config.strategy == "pair-cost":
+            accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
+        else:
+            accepted, skipped = _run_momentum(
+                engine,
+                markets,
+                orderbook_source,
+                candle_source,
+                current_prices,
+                now,
+            )
+        closed = 0
+        finished_at = now
+        if settlement_prices:
+            settlement_now = max(market.window.end for market in markets)
+            closed = engine.close_expired(settlement_prices, now=settlement_now)
+            finished_at = settlement_now
     result_store.finish_run(run_id, finished_at)
     return {
         "ok": True,
@@ -1383,6 +1803,24 @@ def _signal_for(strategy: MomentumUpDownStrategy, candle_source, asset: Asset) -
     return strategy.signal(asset, candles)
 
 
+def _signal_for_at(
+    strategy: MomentumUpDownStrategy,
+    store: SQLiteStore,
+    asset: Asset,
+    observed_at: datetime,
+    source_filter: str | None,
+    session_id: str | None,
+) -> Signal:
+    candles = store.recent_candles(
+        asset.value,
+        limit=5,
+        source_filter=source_filter,
+        until=observed_at,
+        session_id=session_id,
+    )
+    return strategy.signal(asset, candles)
+
+
 def _orderbook_for(source, market, signal: Signal) -> OrderBook | None:
     try:
         return source.orderbook(market.token_for(signal.direction))
@@ -1404,6 +1842,10 @@ def _replace_strategy(config: AgentConfig, value: str) -> AgentConfig:
 
 def _replace_config_values(config: AgentConfig, **updates) -> AgentConfig:
     return AgentConfig(**{**config.__dict__, **updates})
+
+
+def _replace_close_mode(config: AgentConfig, value: str) -> AgentConfig:
+    return AgentConfig(**{**config.__dict__, "close_mode": value})
 
 
 def _asset_filter(value: str) -> Asset | None:
@@ -1431,7 +1873,8 @@ def _config_notes(config: AgentConfig) -> str:
         f"slippage_bps={config.slippage_bps}; max_position_pct={config.max_position_pct}; "
         f"max_position_usd={config.max_position_usd}; failed_fill_probability={config.failed_fill_probability}; "
         f"pair_cost_threshold={config.pair_cost_threshold}; "
-        f"pair_cost_failed_second_leg_probability={config.pair_cost_failed_second_leg_probability}"
+        f"pair_cost_failed_second_leg_probability={config.pair_cost_failed_second_leg_probability}; "
+        f"close_mode={config.close_mode}"
     )
 
 
@@ -1537,6 +1980,26 @@ def _recommended_next_command(verdict: str, session_id: str) -> str:
 def _format_sources(values) -> str:
     items = [str(value) for value in values]
     return ", ".join(items) if items else "none"
+
+
+def _replay_end_time(
+    store: SQLiteStore,
+    *,
+    source_filter: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    session_id: str | None,
+) -> datetime | None:
+    rows = store.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
+    if not rows:
+        return None
+    return _parse_until(str(rows[-1]["observed_at"]))
+
+
+def _trade_time(value) -> datetime | None:
+    if not value:
+        return None
+    return _parse_until(str(value))
 
 
 class _StoredCandleSource:

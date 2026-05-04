@@ -15,6 +15,8 @@ _CONFIG_LABELS = (
     ("pair_cost_failed_second_leg_probability", "pair_cost_failed_second_leg_probability"),
     ("source_filter", "source_filter"),
     ("since", "since"),
+    ("until", "until"),
+    ("close_mode", "close_mode"),
 )
 
 

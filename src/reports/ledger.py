@@ -25,7 +25,9 @@ def build_trade_ledger(store: SQLiteStore, run_id: str | None = None) -> str:
                         f"slippage={float(row['slippage_cost']):.4f}",
                         f"pnl={_fmt(row['pnl'])}",
                         f"status={row['status']}",
+                        f"close_mode={row['close_mode'] or 'n/a'}",
                         f"result={row['result'] or 'OPEN'}",
+                        f"note={row['settlement_note'] or 'n/a'}",
                     ]
                 )
             )

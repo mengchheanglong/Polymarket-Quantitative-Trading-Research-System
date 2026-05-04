@@ -20,6 +20,9 @@ class PairCostDecision:
     combined_spread: float | None
     edge: float
     failed_second_leg: bool = False
+    seconds_to_expiry: float | None = None
+    lifecycle_status: str | None = None
+    timing_bucket: str | None = None
 
 
 class PairCostArbitrageStrategy:

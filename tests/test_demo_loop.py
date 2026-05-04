@@ -56,7 +56,7 @@ def test_run_paper_processes_demo_collection_end_to_end(tmp_path):
 
     store = SQLiteStore(db_path)
     try:
-        closed_trades = store.rows("SELECT result, pnl FROM trades WHERE status = 'CLOSED'")
+        closed_trades = store.rows("SELECT result, pnl FROM trades WHERE status LIKE 'CLOSED%'")
         skipped = store.rows("SELECT COUNT(*) AS count FROM opportunities WHERE decision = 'SKIP'")[0]["count"]
         balance = store.current_balance(default=1000.0)
 
@@ -81,6 +81,8 @@ def test_report_after_demo_collection_and_run_paper(tmp_path, capsys):
 
     stdout = capsys.readouterr().out
     assert "Closed trades: 2" in stdout
+    assert "Open positions: 0" in stdout
+    assert "Unresolved positions: 0" in stdout
     assert "Skipped trades: 1" in stdout
     assert "Win rate: 50.00%" in stdout
     assert "Starting balance: $1000.00" in stdout

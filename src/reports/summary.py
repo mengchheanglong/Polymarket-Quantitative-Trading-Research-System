@@ -20,7 +20,12 @@ class Report:
     total_equity: float
     max_equity_drawdown: float
     max_position_exposure: float
+    open_positions: int
     closed_trades: int
+    unresolved_positions: int
+    settlement_unavailable: int
+    approximate_expiry_settlements: int
+    mark_to_market_settlements: int
     skipped_trades: int
     win_rate: float
     average_edge: float
@@ -41,7 +46,12 @@ class Report:
                 f"Total fake equity: ${self.total_equity:.2f}",
                 f"Max equity drawdown: ${self.max_equity_drawdown:.2f}",
                 f"Max position exposure: ${self.max_position_exposure:.2f}",
+                f"Open positions: {self.open_positions}",
                 f"Closed trades: {self.closed_trades}",
+                f"Unresolved positions: {self.unresolved_positions}",
+                f"Settlement unavailable: {self.settlement_unavailable}",
+                f"Approximate expiry settlements: {self.approximate_expiry_settlements}",
+                f"Mark-to-market settlements: {self.mark_to_market_settlements}",
                 f"Skipped trades: {self.skipped_trades}",
                 f"Win rate: {self.win_rate:.2%}",
                 f"Average edge: {self.average_edge:.4f}",
@@ -62,7 +72,7 @@ def build_report(
     if run_ids:
         placeholders = ",".join("?" for _ in run_ids)
         trade_rows = store.rows(
-            f"SELECT result, pnl FROM trades WHERE status = 'CLOSED' AND run_id IN ({placeholders})",
+            f"SELECT result, pnl, status, close_mode FROM trades WHERE run_id IN ({placeholders})",
             tuple(run_ids),
         )
         open_rows = store.rows(
@@ -70,11 +80,14 @@ def build_report(
             tuple(run_ids),
         )
     else:
-        trade_rows = store.rows("SELECT result, pnl FROM trades WHERE status = 'CLOSED'")
+        trade_rows = store.rows("SELECT result, pnl, status, close_mode FROM trades")
         open_rows = store.open_trades()
-    closed = len(trade_rows)
-    wins = sum(1 for row in trade_rows if row["result"] == "WIN")
-    realized_pnl = sum(float(row["pnl"] or 0.0) for row in trade_rows)
+    closed_rows = [row for row in trade_rows if str(row["status"]).startswith("CLOSED")]
+    unresolved_rows = [row for row in trade_rows if row["status"] == "EXPIRED_UNRESOLVED"]
+    settlement_unavailable_rows = [row for row in trade_rows if row["status"] == "SETTLEMENT_UNAVAILABLE"]
+    closed = len(closed_rows)
+    wins = sum(1 for row in closed_rows if row["result"] == "WIN")
+    realized_pnl = sum(float(row["pnl"] or 0.0) for row in closed_rows)
     open_value = sum(float(row["shares"]) * float(row["entry_price"]) for row in open_rows)
     open_exposure = sum(float(row["total_cost"]) for row in open_rows)
     unrealized_pnl = open_value - open_exposure
@@ -141,7 +154,12 @@ def build_report(
         total_equity=total_equity,
         max_equity_drawdown=_max_drawdown(equity_values),
         max_position_exposure=max_exposure,
+        open_positions=len(open_rows),
         closed_trades=closed,
+        unresolved_positions=len(unresolved_rows),
+        settlement_unavailable=len(settlement_unavailable_rows),
+        approximate_expiry_settlements=sum(1 for row in closed_rows if row["close_mode"] == "approximate-expiry"),
+        mark_to_market_settlements=sum(1 for row in closed_rows if row["status"] == "CLOSED_BY_MARK_TO_MARKET"),
         skipped_trades=int(skipped),
         win_rate=wins / closed if closed else 0.0,
         average_edge=avg_edge,
