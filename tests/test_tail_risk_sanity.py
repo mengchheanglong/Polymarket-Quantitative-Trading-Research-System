@@ -109,13 +109,15 @@ def test_profit_concentration_and_tail_risk_verdicts(tmp_path):
     assert report.warnings == (
         "TAIL_RISK_CONCENTRATED_PROFIT",
         "LOW_PRICE_BINARY_TAIL_STRATEGY",
+        "ACCEPTED_EDGE_NEGATIVE",
     )
     assert "TAIL_RISK_DOMINATED" in report.verdicts
     assert "SETTLEMENT_APPROXIMATION_UNCERTAIN" in report.verdicts
     assert "INSUFFICIENT_CLOSED_TRADES" in report.verdicts
+    assert "Average accepted-trade edge:" in text
     assert "Top 1 trade pct of total PnL:" in text
     assert "PnL excluding top 3 trades:" in text
-    assert "Warnings: TAIL_RISK_CONCENTRATED_PROFIT, LOW_PRICE_BINARY_TAIL_STRATEGY" in text
+    assert "Warnings: TAIL_RISK_CONCENTRATED_PROFIT, LOW_PRICE_BINARY_TAIL_STRATEGY, ACCEPTED_EDGE_NEGATIVE" in text
 
 
 def test_close_mode_compare_and_settlement_report(tmp_path, capsys):

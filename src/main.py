@@ -17,10 +17,13 @@ from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook,
 from src.reports.backtest import build_backtest_report
 from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
+from src.reports.close_divergence import build_close_divergence_report
 from src.reports.dataset import build_dataset_summary
 from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
+from src.reports.momentum_audit import build_momentum_audit_report
 from src.reports.settlement import build_settlement_report
+from src.reports.signal_audit import build_signal_audit
 from src.reports.summary import build_report
 from src.reports.sweep import SweepRow, build_sweep_report
 from src.safety import SafetyError, enforce_paper_only
@@ -88,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
+    replay_parser.add_argument(
+        "--momentum-preset",
+        choices=("balanced-tiny-momentum", "conservative-tiny-momentum"),
+        default=None,
+        help="Apply a paper-only momentum research preset.",
+    )
     replay_parser.add_argument(
         "--close-mode",
         choices=("none", "mark-to-market", "expiry-if-known", "approximate-expiry"),
@@ -195,6 +204,28 @@ def main(argv: list[str] | None = None) -> int:
     settlement_report_parser = subcommands.add_parser("settlement-report", help="Inspect approximate-expiry settlement inputs for a run")
     settlement_report_parser.add_argument("--run-id", help="Inspect a specific run.")
     settlement_report_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
+    signal_audit_parser = subcommands.add_parser("signal-audit", help="Audit accepted momentum signals for a run")
+    signal_audit_parser.add_argument("--run-id", help="Inspect a specific run.")
+    signal_audit_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
+    close_divergence_parser = subcommands.add_parser("close-divergence", help="Compare mark-to-market and approximate-expiry outcomes")
+    close_divergence_parser.add_argument("--strategy", choices=("momentum",), default="momentum")
+    close_divergence_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    close_divergence_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
+    close_divergence_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
+    close_divergence_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    close_divergence_parser.add_argument("--active-only", action="store_true")
+    close_divergence_parser.add_argument("--tiny", action="store_true")
+    close_divergence_parser.add_argument(
+        "--momentum-preset",
+        choices=("balanced-tiny-momentum", "conservative-tiny-momentum"),
+        default=None,
+    )
+    momentum_audit_parser = subcommands.add_parser("momentum-audit", help="Run paper-only momentum filter and timing experiments")
+    momentum_audit_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    momentum_audit_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
+    momentum_audit_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
+    momentum_audit_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    momentum_audit_parser.add_argument("--tiny", action="store_true")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -206,8 +237,10 @@ def main(argv: list[str] | None = None) -> int:
         config = _replace_strategy(config, args.strategy)
     if getattr(args, "close_mode", None):
         config = _replace_close_mode(config, args.close_mode)
-    if getattr(args, "tiny", False) and args.command in {"replay", "run-paper", "close-mode-compare"}:
+    if getattr(args, "tiny", False) and args.command in {"replay", "run-paper", "close-mode-compare", "close-divergence", "momentum-audit"}:
         config = _replace_tiny_profile(config)
+    if getattr(args, "momentum_preset", None):
+        config = _apply_momentum_preset(config, args.momentum_preset)
 
     try:
         enforce_paper_only(config.dry_run, config.execution_mode)
@@ -259,6 +292,12 @@ def main(argv: list[str] | None = None) -> int:
             return close_mode_compare(config, args)
         if args.command == "settlement-report":
             return settlement_report(config, args)
+        if args.command == "signal-audit":
+            return signal_audit(config, args)
+        if args.command == "close-divergence":
+            return close_divergence(config, args)
+        if args.command == "momentum-audit":
+            return momentum_audit(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -666,6 +705,7 @@ def run_paper(config: AgentConfig) -> int:
             accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
         else:
             accepted, skipped = _run_momentum(
+                config,
                 engine,
                 markets,
                 orderbook_source,
@@ -1061,6 +1101,141 @@ def settlement_report(config: AgentConfig, args) -> int:
     return 0
 
 
+def signal_audit(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        run_id = getattr(args, "run_id", None)
+        if not run_id:
+            run_id = store.latest_run_id() if bool(getattr(args, "latest", False)) or not getattr(args, "run_id", None) else None
+        if not run_id:
+            print("No run selected.")
+            return 1
+        print(build_signal_audit(store, run_id))
+    finally:
+        store.close()
+    return 0
+
+
+def close_divergence(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None))
+    data_store = SQLiteStore(config.database_path)
+    try:
+        session_id, since, until = _resolved_time_filters(data_store, args)
+        active_only = bool(getattr(args, "active_only", False))
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
+        results = {}
+        for close_mode in ("mark-to-market", "approximate-expiry"):
+            override = _replace_close_mode(config, close_mode)
+            with tempfile.TemporaryDirectory(prefix="close-divergence-") as temp_dir:
+                scratch = SQLiteStore(Path(temp_dir) / f"{close_mode}.sqlite3")
+                try:
+                    outcome = _simulate_replay(
+                        override,
+                        source_filter=source_filter,
+                        since=since,
+                        until=until,
+                        session_id=session_id,
+                        active_only=active_only,
+                        min_seconds_to_expiry=min_seconds_to_expiry,
+                        max_seconds_to_expiry=max_seconds_to_expiry,
+                        now=datetime.now(timezone.utc),
+                        data_store=data_store,
+                        result_store=scratch,
+                        mode="replay",
+                        since_label=getattr(args, "since", None),
+                    )
+                    if not outcome["ok"]:
+                        print(outcome["message"])
+                        return 1
+                    results[close_mode] = scratch.trade_rows(run_id=outcome["run_id"])
+                finally:
+                    scratch.close()
+        print(
+            build_close_divergence_report(
+                strategy=getattr(args, "strategy"),
+                source_filter=source_filter,
+                session_id=session_id,
+                active_only=active_only,
+                tiny=bool(getattr(args, "tiny", False)),
+                mark_rows=results["mark-to-market"],
+                approx_rows=results["approximate-expiry"],
+            )
+        )
+    finally:
+        data_store.close()
+    return 0
+
+
+def momentum_audit(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None))
+    data_store = SQLiteStore(config.database_path)
+    try:
+        session_id, since, until = _resolved_time_filters(data_store, args)
+        base_active_only = True
+        experiments: list[tuple[str, AgentConfig]] = [
+            ("up-only", _replace_config_values(config, momentum_side_filter="UP")),
+            ("down-only", _replace_config_values(config, momentum_side_filter="DOWN")),
+            ("btc-only", _replace_config_values(config, momentum_asset_filter="BTC")),
+            ("eth-only", _replace_config_values(config, momentum_asset_filter="ETH")),
+            ("5m-only", _replace_config_values(config, momentum_duration_filter="5m")),
+            ("15m-only", _replace_config_values(config, momentum_duration_filter="15m")),
+            ("expiry-30-60", _replace_config_values(config, min_seconds_to_expiry=30, max_seconds_to_expiry=60)),
+            ("expiry-60-120", _replace_config_values(config, min_seconds_to_expiry=60, max_seconds_to_expiry=120)),
+            ("expiry-120-180", _replace_config_values(config, min_seconds_to_expiry=120, max_seconds_to_expiry=180)),
+            ("expiry-180-240", _replace_config_values(config, min_seconds_to_expiry=180, max_seconds_to_expiry=240)),
+            ("balanced-tiny-momentum", _apply_momentum_preset(config, "balanced-tiny-momentum")),
+            ("conservative-tiny-momentum", _apply_momentum_preset(config, "conservative-tiny-momentum")),
+        ]
+        baseline_rows = []
+        timing_rows = []
+        for close_mode in ("approximate-expiry", "mark-to-market"):
+            override = _replace_close_mode(config, close_mode)
+            summary = _scratch_replay_summary(
+                override,
+                data_store=data_store,
+                source_filter=source_filter,
+                since=since,
+                until=until,
+                session_id=session_id,
+                active_only=base_active_only,
+                min_seconds_to_expiry=override.min_seconds_to_expiry,
+                max_seconds_to_expiry=override.max_seconds_to_expiry,
+                mode="replay",
+                label="baseline",
+            )
+            baseline_rows.append(summary)
+            timing_rows.extend(_timing_bucket_rows(summary["trade_rows"], close_mode))
+        experiment_rows = []
+        for label, override in experiments:
+            summary = _scratch_replay_summary(
+                _replace_close_mode(override, "approximate-expiry"),
+                data_store=data_store,
+                source_filter=source_filter,
+                since=since,
+                until=until,
+                session_id=session_id,
+                active_only=base_active_only,
+                min_seconds_to_expiry=override.min_seconds_to_expiry,
+                max_seconds_to_expiry=override.max_seconds_to_expiry,
+                mode="replay",
+                label=label,
+            )
+            experiment_rows.append(summary)
+        print(
+            build_momentum_audit_report(
+                source_filter=source_filter,
+                session_id=session_id,
+                tiny=bool(getattr(args, "tiny", False)),
+                baseline_rows=baseline_rows,
+                timing_rows=timing_rows,
+                experiment_rows=experiment_rows,
+            )
+        )
+    finally:
+        data_store.close()
+    return 0
+
+
 def readiness(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
@@ -1204,6 +1379,7 @@ def discover_markets(config: AgentConfig, args) -> int:
 
 
 def _run_momentum(
+    config: AgentConfig,
     engine: PaperTradingEngine,
     markets,
     orderbook_source,
@@ -1216,6 +1392,11 @@ def _run_momentum(
     skipped = 0
     for market in markets:
         signal = _signal_for(strategy, candle_source, market.asset)
+        filter_decision = _apply_momentum_filters(config, market, signal, now)
+        if filter_decision is not None:
+            engine.store.log_opportunity(now, filter_decision, run_id=engine.run_id)
+            skipped += 1
+            continue
         orderbook = _orderbook_for(orderbook_source, market, signal)
         if orderbook is None:
             decision = OpportunityDecision(
@@ -1229,7 +1410,18 @@ def _run_momentum(
             engine.store.log_opportunity(now, decision, run_id=engine.run_id)
             skipped += 1
             continue
-
+        filter_decision = _apply_momentum_filters(
+            config,
+            market,
+            signal,
+            now,
+            market_price=orderbook.best_ask or orderbook.midpoint,
+            spread=orderbook.spread if orderbook.spread is not None else config.assumed_spread,
+        )
+        if filter_decision is not None:
+            engine.store.log_opportunity(now, filter_decision, run_id=engine.run_id)
+            skipped += 1
+            continue
         decision = engine.evaluate(market, signal, orderbook, now=now)
         snapshot = current_prices[market.asset.value]
         fill = engine.enter(decision, orderbook, snapshot, now=now)
@@ -1269,6 +1461,65 @@ def _run_pair_cost(
         else:
             skipped += 1
     return accepted, skipped
+
+
+def _market_duration_label(market: Market) -> str:
+    minutes = market.window.duration_minutes
+    if 4.0 <= minutes <= 6.0:
+        return "5m"
+    if 14.0 <= minutes <= 16.0:
+        return "15m"
+    return "unknown"
+
+
+def _momentum_skip_decision(
+    config: AgentConfig,
+    market: Market,
+    signal: Signal,
+    reason: str,
+    observed_at: datetime,
+    market_price: float | None = None,
+    spread: float | None = None,
+) -> OpportunityDecision:
+    lifecycle = classify_market_lifecycle(
+        market,
+        observed_at,
+        min_seconds_before_end=config.min_seconds_before_end,
+        max_seconds_after_start=config.max_seconds_after_start,
+    )
+    return OpportunityDecision(
+        market=market,
+        signal=signal,
+        market_price=market_price,
+        spread=spread,
+        decision="SKIP",
+        reason=reason,
+        seconds_to_expiry=lifecycle.seconds_to_expiry,
+        lifecycle_status=lifecycle.status,
+        timing_bucket=lifecycle.timing_bucket,
+    )
+
+
+def _apply_momentum_filters(
+    config: AgentConfig,
+    market: Market,
+    signal: Signal,
+    observed_at: datetime,
+    *,
+    market_price: float | None = None,
+    spread: float | None = None,
+) -> OpportunityDecision | None:
+    if config.momentum_asset_filter and market.asset.value != config.momentum_asset_filter:
+        return _momentum_skip_decision(config, market, signal, "asset filter", observed_at, market_price, spread)
+    if config.momentum_duration_filter and _market_duration_label(market) != config.momentum_duration_filter:
+        return _momentum_skip_decision(config, market, signal, "duration filter", observed_at, market_price, spread)
+    if config.momentum_side_filter and signal.direction.value != config.momentum_side_filter:
+        return _momentum_skip_decision(config, market, signal, "side filter", observed_at, market_price, spread)
+    if market_price is not None and config.momentum_min_entry_price is not None and market_price < config.momentum_min_entry_price:
+        return _momentum_skip_decision(config, market, signal, "entry price below minimum", observed_at, market_price, spread)
+    if market_price is not None and config.momentum_max_entry_price is not None and market_price > config.momentum_max_entry_price:
+        return _momentum_skip_decision(config, market, signal, "entry price above maximum", observed_at, market_price, spread)
+    return None
 
 
 def _run_replay_momentum(
@@ -1324,6 +1575,11 @@ def _run_replay_momentum(
             skipped += 1
             continue
         signal = _signal_for_at(strategy, data_store, market.asset, observed_at, source_filter, session_id)
+        filter_decision = _apply_momentum_filters(config, market, signal, observed_at)
+        if filter_decision is not None:
+            engine.store.log_opportunity(observed_at, filter_decision, run_id=engine.run_id)
+            skipped += 1
+            continue
         orderbook = data_store.collected_orderbook(
             market.token_for(signal.direction),
             source_filter=source_filter,
@@ -1351,7 +1607,18 @@ def _run_replay_momentum(
             engine.store.log_opportunity(observed_at, decision, run_id=engine.run_id)
             skipped += 1
             continue
-
+        filter_decision = _apply_momentum_filters(
+            config,
+            market,
+            signal,
+            observed_at,
+            market_price=orderbook.best_ask or orderbook.midpoint,
+            spread=orderbook.spread if orderbook.spread is not None else config.assumed_spread,
+        )
+        if filter_decision is not None:
+            engine.store.log_opportunity(observed_at, filter_decision, run_id=engine.run_id)
+            skipped += 1
+            continue
         decision = engine.evaluate(market, signal, orderbook, now=observed_at)
         fill = engine.enter(decision, orderbook, price_snapshot, now=observed_at)
         if fill:
@@ -1905,6 +2172,7 @@ def _simulate_replay(
             accepted, skipped = _run_pair_cost(config, engine, markets, orderbook_source, current_prices, now)
         else:
             accepted, skipped = _run_momentum(
+                config,
                 engine,
                 markets,
                 orderbook_source,
@@ -1928,6 +2196,101 @@ def _simulate_replay(
         "run_id": run_id,
         "finished_at": finished_at,
     }
+
+
+def _scratch_replay_summary(
+    config: AgentConfig,
+    *,
+    data_store: SQLiteStore,
+    source_filter: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    session_id: str | None,
+    active_only: bool,
+    min_seconds_to_expiry: int | None,
+    max_seconds_to_expiry: int | None,
+    mode: str,
+    label: str,
+) -> dict:
+    with tempfile.TemporaryDirectory(prefix="momentum-audit-") as temp_dir:
+        scratch = SQLiteStore(Path(temp_dir) / "audit.sqlite3")
+        try:
+            outcome = _simulate_replay(
+                config,
+                source_filter=source_filter,
+                since=since,
+                until=until,
+                session_id=session_id,
+                active_only=active_only,
+                min_seconds_to_expiry=min_seconds_to_expiry,
+                max_seconds_to_expiry=max_seconds_to_expiry,
+                now=datetime.now(timezone.utc),
+                data_store=data_store,
+                result_store=scratch,
+                mode=mode,
+                since_label=since.isoformat() if since else None,
+            )
+            if not outcome["ok"]:
+                return {
+                    "label": label,
+                    "close_mode": config.close_mode,
+                    "accepted": 0,
+                    "closed": 0,
+                    "realized_pnl": 0.0,
+                    "win_rate": 0.0,
+                    "average_edge": 0.0,
+                    "average_edge_accepted": None,
+                    "risk_blocked_trades": 0,
+                    "max_exposure": 0.0,
+                    "warnings": ("FAILED_REPLAY",),
+                    "verdicts": (outcome["message"],),
+                    "trade_rows": [],
+                }
+            report = build_report(scratch, config.starting_balance, run_id=outcome["run_id"])
+            return {
+                "label": label,
+                "close_mode": config.close_mode,
+                "accepted": outcome["accepted"],
+                "closed": report.closed_trades,
+                "realized_pnl": report.realized_pnl,
+                "win_rate": report.win_rate,
+                "average_edge": report.average_edge,
+                "average_edge_accepted": report.average_edge_accepted,
+                "risk_blocked_trades": report.risk_blocked_trades,
+                "max_exposure": report.max_position_exposure,
+                "warnings": report.warnings,
+                "verdicts": report.verdicts,
+                "trade_rows": scratch.trade_rows(run_id=outcome["run_id"]),
+            }
+        finally:
+            scratch.close()
+
+
+def _timing_bucket_rows(trade_rows, close_mode: str) -> list[dict[str, object]]:
+    buckets: dict[str, list] = {}
+    for row in trade_rows:
+        bucket = _report_seconds_bucket(row)
+        buckets.setdefault(bucket, []).append(row)
+    output = []
+    for bucket, rows in sorted(buckets.items()):
+        closed = [row for row in rows if row["pnl"] is not None]
+        wins = sum(1 for row in closed if float(row["pnl"] or 0.0) > 0)
+        output.append(
+            {
+                "close_mode": close_mode,
+                "bucket": bucket,
+                "closed": len(closed),
+                "wins": wins,
+                "win_rate": wins / len(closed) if closed else 0.0,
+                "realized_pnl": sum(float(row["pnl"] or 0.0) for row in closed),
+                "avg_entry_price": (
+                    sum(float(row["entry_price"]) for row in rows) / len(rows)
+                    if rows
+                    else None
+                ),
+            }
+        )
+    return output
 
 
 def _effective_data_mode(config: AgentConfig, store: SQLiteStore) -> str:
@@ -2298,6 +2661,12 @@ def _config_notes(config: AgentConfig) -> str:
         f"stuck_max_spread={config.stuck_max_spread}; "
         f"stuck_min_seconds_to_expiry={config.stuck_min_seconds_to_expiry}; "
         f"stuck_max_seconds_to_expiry={config.stuck_max_seconds_to_expiry}; "
+        f"momentum_preset={config.momentum_preset or 'none'}; "
+        f"momentum_side_filter={config.momentum_side_filter or 'none'}; "
+        f"momentum_asset_filter={config.momentum_asset_filter or 'none'}; "
+        f"momentum_duration_filter={config.momentum_duration_filter or 'none'}; "
+        f"momentum_min_entry_price={config.momentum_min_entry_price if config.momentum_min_entry_price is not None else 'none'}; "
+        f"momentum_max_entry_price={config.momentum_max_entry_price if config.momentum_max_entry_price is not None else 'none'}; "
         f"close_mode={config.close_mode}; tiny_profile={'true' if config.tiny_profile else 'false'}"
     )
 
@@ -2317,6 +2686,32 @@ def _replace_tiny_profile(config: AgentConfig) -> AgentConfig:
         max_seconds_to_expiry=240,
         tiny_profile=True,
     )
+
+
+def _apply_momentum_preset(config: AgentConfig, preset: str) -> AgentConfig:
+    base = _replace_tiny_profile(config)
+    if preset == "balanced-tiny-momentum":
+        return _replace_config_values(
+            base,
+            momentum_preset=preset,
+            min_seconds_to_expiry=60,
+            max_seconds_to_expiry=180,
+            max_spread=min(base.max_spread, 0.05),
+        )
+    if preset == "conservative-tiny-momentum":
+        return _replace_config_values(
+            base,
+            momentum_preset=preset,
+            momentum_asset_filter="BTC",
+            momentum_duration_filter="5m",
+            momentum_min_entry_price=0.05,
+            momentum_max_entry_price=0.85,
+            min_edge=max(base.min_edge, 0.03),
+            max_spread=min(base.max_spread, 0.02),
+            min_seconds_to_expiry=60,
+            max_seconds_to_expiry=180,
+        )
+    raise ValueError(f"unsupported momentum preset: {preset}")
 
 
 def _effective_expiry_filters(config: AgentConfig, args) -> tuple[int | None, int | None]:
@@ -2451,6 +2846,23 @@ def _trade_time(value) -> datetime | None:
     if not value:
         return None
     return _parse_until(str(value))
+
+
+def _report_seconds_bucket(trade_row) -> str:
+    opened = _trade_time(trade_row["opened_at"])
+    expiry = _trade_time(trade_row["window_end"])
+    if opened is None or expiry is None:
+        return "unknown"
+    seconds = max(0.0, (expiry - opened).total_seconds())
+    if seconds < 60:
+        return "30-60"
+    if seconds < 120:
+        return "60-120"
+    if seconds < 180:
+        return "120-180"
+    if seconds < 240:
+        return "180-240"
+    return "240+"
 
 
 class _StoredCandleSource:

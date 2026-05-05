@@ -53,6 +53,7 @@ Useful ideas:
 - monitoring with Prometheus/Grafana
 - simulation/live separation pattern
 - NautilusTrader-style architecture ideas
+- strategy-audit workflow ideas such as checking whether mark-to-market behavior survives a stricter expiry-based settlement approximation
 
 Do not copy yet:
 - live execution
@@ -63,7 +64,7 @@ Do not copy yet:
 
 Relevant future phases:
 - Phase 14+: strategy signal design
-- Phase 15+: monitoring/reporting
+- Phase 15+: monitoring/reporting and strategy-audit workflow
 - Phase 17+: live-executor design review, separate from paper engine
 
 Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

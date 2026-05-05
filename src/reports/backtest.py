@@ -31,6 +31,16 @@ class BacktestReport:
     max_equity_drawdown: float
     max_position_exposure: float
     average_edge: float
+    average_edge_accepted: float | None
+    average_edge_skipped: float | None
+    accepted_edge_min: float | None
+    accepted_edge_median: float | None
+    accepted_edge_max: float | None
+    accepted_trades_by_side: dict[str, int]
+    accepted_trades_by_asset: dict[str, int]
+    accepted_trades_by_duration: dict[str, int]
+    accepted_trades_by_seconds_bucket: dict[str, int]
+    accepted_trades_by_entry_price_bucket: dict[str, int]
     average_pnl_per_trade: float | None
     average_win: float | None
     average_loss: float | None
@@ -98,6 +108,14 @@ class BacktestReport:
                 f"Max equity drawdown: ${self.max_equity_drawdown:.2f}",
                 f"Max position exposure: ${self.max_position_exposure:.2f}",
                 f"Average edge: {self.average_edge:.4f}",
+                f"Average accepted-trade edge: {_fmt_float(self.average_edge_accepted)}",
+                f"Average skipped-trade edge: {_fmt_float(self.average_edge_skipped)}",
+                f"Accepted edge min/median/max: {_fmt_float(self.accepted_edge_min)} / {_fmt_float(self.accepted_edge_median)} / {_fmt_float(self.accepted_edge_max)}",
+                f"Accepted trades by side: {_format_map(self.accepted_trades_by_side)}",
+                f"Accepted trades by asset: {_format_map(self.accepted_trades_by_asset)}",
+                f"Accepted trades by duration: {_format_map(self.accepted_trades_by_duration)}",
+                f"Accepted trades by seconds-to-expiry bucket: {_format_map(self.accepted_trades_by_seconds_bucket)}",
+                f"Accepted trades by entry price bucket: {_format_map(self.accepted_trades_by_entry_price_bucket)}",
                 f"Average PnL per trade: {_fmt_money(self.average_pnl_per_trade)}",
                 f"Average win: {_fmt_money(self.average_win)}",
                 f"Average loss: {_fmt_money(self.average_loss)}",
@@ -212,6 +230,16 @@ def build_backtest_report(
         max_equity_drawdown=report.max_equity_drawdown,
         max_position_exposure=report.max_position_exposure,
         average_edge=report.average_edge,
+        average_edge_accepted=report.average_edge_accepted,
+        average_edge_skipped=report.average_edge_skipped,
+        accepted_edge_min=report.accepted_edge_min,
+        accepted_edge_median=report.accepted_edge_median,
+        accepted_edge_max=report.accepted_edge_max,
+        accepted_trades_by_side=report.accepted_trades_by_side,
+        accepted_trades_by_asset=report.accepted_trades_by_asset,
+        accepted_trades_by_duration=report.accepted_trades_by_duration,
+        accepted_trades_by_seconds_bucket=report.accepted_trades_by_seconds_bucket,
+        accepted_trades_by_entry_price_bucket=report.accepted_trades_by_entry_price_bucket,
         average_pnl_per_trade=report.average_pnl_per_trade,
         average_win=report.average_win,
         average_loss=report.average_loss,
@@ -305,6 +333,16 @@ def _empty_report(source_filter: str, starting_balance: float) -> Report:
         risk_blocked_trades=0,
         win_rate=0.0,
         average_edge=0.0,
+        average_edge_accepted=None,
+        average_edge_skipped=None,
+        accepted_edge_min=None,
+        accepted_edge_median=None,
+        accepted_edge_max=None,
+        accepted_trades_by_side={},
+        accepted_trades_by_asset={},
+        accepted_trades_by_duration={},
+        accepted_trades_by_seconds_bucket={},
+        accepted_trades_by_entry_price_bucket={},
         average_pnl_per_trade=None,
         average_win=None,
         average_loss=None,
@@ -345,6 +383,12 @@ def _fmt_money(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"${value:.2f}"
+
+
+def _fmt_float(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.4f}"
 
 
 def _fmt_ratio(value: float | None) -> str:

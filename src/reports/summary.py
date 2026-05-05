@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from src.reports.config_view import format_config_view, merged_config_view
+from src.reports.config_view import format_config_view, merged_config_view, parse_config_notes
 from src.simulator.engine import RISK_BLOCK_REASONS
 from src.storage.sqlite import SQLiteStore
 
@@ -33,6 +33,16 @@ class Report:
     risk_blocked_trades: int
     win_rate: float
     average_edge: float
+    average_edge_accepted: float | None
+    average_edge_skipped: float | None
+    accepted_edge_min: float | None
+    accepted_edge_median: float | None
+    accepted_edge_max: float | None
+    accepted_trades_by_side: dict[str, int]
+    accepted_trades_by_asset: dict[str, int]
+    accepted_trades_by_duration: dict[str, int]
+    accepted_trades_by_seconds_bucket: dict[str, int]
+    accepted_trades_by_entry_price_bucket: dict[str, int]
     average_pnl_per_trade: float | None
     average_win: float | None
     average_loss: float | None
@@ -88,6 +98,14 @@ class Report:
                 f"Risk-blocked trades: {self.risk_blocked_trades}",
                 f"Win rate: {self.win_rate:.2%}",
                 f"Average edge: {self.average_edge:.4f}",
+                f"Average accepted-trade edge: {_fmt_float(self.average_edge_accepted)}",
+                f"Average skipped-trade edge: {_fmt_float(self.average_edge_skipped)}",
+                f"Accepted edge min/median/max: {_fmt_float(self.accepted_edge_min)} / {_fmt_float(self.accepted_edge_median)} / {_fmt_float(self.accepted_edge_max)}",
+                f"Accepted trades by side: {_fmt_map(self.accepted_trades_by_side)}",
+                f"Accepted trades by asset: {_fmt_map(self.accepted_trades_by_asset)}",
+                f"Accepted trades by duration: {_fmt_map(self.accepted_trades_by_duration)}",
+                f"Accepted trades by seconds-to-expiry bucket: {_fmt_map(self.accepted_trades_by_seconds_bucket)}",
+                f"Accepted trades by entry price bucket: {_fmt_map(self.accepted_trades_by_entry_price_bucket)}",
                 f"Average PnL per trade: {_fmt_money(self.average_pnl_per_trade)}",
                 f"Average win: {_fmt_money(self.average_win)}",
                 f"Average loss: {_fmt_money(self.average_loss)}",
@@ -159,20 +177,25 @@ def build_report(
             f"SELECT COUNT(*) AS count FROM opportunities WHERE decision = 'SKIP' AND run_id IN ({placeholders})",
             tuple(run_ids),
         )[0]["count"]
-        edge_rows = store.rows(
-            f"SELECT edge FROM opportunities WHERE run_id IN ({placeholders})",
+        opportunity_rows = store.rows(
+            f"SELECT * FROM opportunities WHERE run_id IN ({placeholders})",
             tuple(run_ids),
         )
     else:
         skipped = store.rows("SELECT COUNT(*) AS count FROM opportunities WHERE decision = 'SKIP'")[0][
             "count"
         ]
-        edge_rows = store.rows("SELECT edge FROM opportunities")
+        opportunity_rows = store.rows("SELECT * FROM opportunities")
     avg_edge = (
-        sum(float(row["edge"] or 0.0) for row in edge_rows) / len(edge_rows)
-        if edge_rows
+        sum(float(row["edge"] or 0.0) for row in opportunity_rows) / len(opportunity_rows)
+        if opportunity_rows
         else 0.0
     )
+    accepted_opportunities = [row for row in opportunity_rows if str(row["decision"]) == "TRADE"]
+    skipped_opportunities = [row for row in opportunity_rows if str(row["decision"]) == "SKIP"]
+    accepted_edge_values = [float(row["edge"] or 0.0) for row in accepted_opportunities]
+    skipped_edge_values = [float(row["edge"] or 0.0) for row in skipped_opportunities]
+    accepted_breakdowns = _accepted_trade_breakdowns(trade_rows)
     if len(run_ids) == 1:
         current_balance = store.current_balance(default=starting_balance, run_id=run_ids[-1])
     elif run_ids:
@@ -225,6 +248,7 @@ def build_report(
         realized_pnl=realized_pnl,
         closed_trades=closed,
         average_edge=avg_edge,
+        average_edge_accepted=_safe_avg(accepted_edge_values),
         expectancy_per_trade=expectancy_per_trade,
         average_win=average_win,
         average_loss=average_loss,
@@ -233,6 +257,8 @@ def build_report(
         low_price=low_price,
         close_mode=close_mode_value,
         approximate_expiry_settlements=sum(1 for row in closed_rows if row["close_mode"] == "approximate-expiry"),
+        close_mode_divergence=_close_mode_divergence_exists(store, run_rows[0] if len(run_rows) == 1 else None),
+        all_closed_trades_lost=closed > 0 and wins == 0,
     )
     return Report(
         scope=scope,
@@ -258,6 +284,16 @@ def build_report(
         risk_blocked_trades=risk_blocked,
         win_rate=wins / closed if closed else 0.0,
         average_edge=avg_edge,
+        average_edge_accepted=_safe_avg(accepted_edge_values),
+        average_edge_skipped=_safe_avg(skipped_edge_values),
+        accepted_edge_min=min(accepted_edge_values, default=None),
+        accepted_edge_median=_median(accepted_edge_values),
+        accepted_edge_max=max(accepted_edge_values, default=None),
+        accepted_trades_by_side=accepted_breakdowns["by_side"],
+        accepted_trades_by_asset=accepted_breakdowns["by_asset"],
+        accepted_trades_by_duration=accepted_breakdowns["by_duration"],
+        accepted_trades_by_seconds_bucket=accepted_breakdowns["by_seconds_bucket"],
+        accepted_trades_by_entry_price_bucket=accepted_breakdowns["by_entry_price_bucket"],
         average_pnl_per_trade=average_pnl_per_trade,
         average_win=average_win,
         average_loss=average_loss,
@@ -352,6 +388,12 @@ def _fmt_money(value: float | None) -> str:
     return f"${value:.2f}"
 
 
+def _fmt_float(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.4f}"
+
+
 def _fmt_ratio(value: float | None) -> str:
     if value is None:
         return "n/a"
@@ -370,6 +412,28 @@ def _float_or_none(value: str | None) -> float | None:
     if value in (None, "", "none", "n/a", "mixed"):
         return None
     return float(value)
+
+
+def _safe_avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _fmt_map(values: dict[str, int]) -> str:
+    if not values:
+        return "none"
+    return ", ".join(f"{key}={value}" for key, value in values.items())
 
 
 def _profit_concentration(closed_rows, realized_pnl: float) -> dict[str, float | None]:
@@ -435,11 +499,135 @@ def _low_price_contribution(closed_rows) -> dict[str, float | int]:
     }
 
 
+def _accepted_trade_breakdowns(trade_rows) -> dict[str, dict[str, int]]:
+    by_side: dict[str, int] = {}
+    by_asset: dict[str, int] = {}
+    by_duration: dict[str, int] = {}
+    by_seconds_bucket: dict[str, int] = {}
+    by_entry_price_bucket: dict[str, int] = {}
+    for row in trade_rows:
+        side = str(row["direction"])
+        asset = str(row["asset"])
+        duration = _duration_label(row["window_start"], row["window_end"])
+        seconds_bucket = _seconds_bucket(row["opened_at"], row["window_end"])
+        price_bucket = _entry_price_bucket(float(row["entry_price"]))
+        by_side[side] = by_side.get(side, 0) + 1
+        by_asset[asset] = by_asset.get(asset, 0) + 1
+        by_duration[duration] = by_duration.get(duration, 0) + 1
+        by_seconds_bucket[seconds_bucket] = by_seconds_bucket.get(seconds_bucket, 0) + 1
+        by_entry_price_bucket[price_bucket] = by_entry_price_bucket.get(price_bucket, 0) + 1
+    return {
+        "by_side": by_side,
+        "by_asset": by_asset,
+        "by_duration": by_duration,
+        "by_seconds_bucket": by_seconds_bucket,
+        "by_entry_price_bucket": by_entry_price_bucket,
+    }
+
+
+def _duration_label(window_start, window_end) -> str:
+    if not window_start or not window_end:
+        return "unknown"
+    start = _parse_iso(str(window_start))
+    end = _parse_iso(str(window_end))
+    minutes = (end - start).total_seconds() / 60.0
+    if 4.0 <= minutes <= 6.0:
+        return "5m"
+    if 14.0 <= minutes <= 16.0:
+        return "15m"
+    return "unknown"
+
+
+def _seconds_bucket(opened_at, window_end) -> str:
+    if not opened_at or not window_end:
+        return "unknown"
+    seconds = max(0.0, (_parse_iso(str(window_end)) - _parse_iso(str(opened_at))).total_seconds())
+    if seconds < 60:
+        return "30-60"
+    if seconds < 120:
+        return "60-120"
+    if seconds < 180:
+        return "120-180"
+    if seconds < 240:
+        return "180-240"
+    return "240+"
+
+
+def _entry_price_bucket(entry_price: float) -> str:
+    if entry_price < 0.05:
+        return "<0.05"
+    if entry_price < 0.10:
+        return "0.05-0.10"
+    if entry_price < 0.25:
+        return "0.10-0.25"
+    if entry_price < 0.50:
+        return "0.25-0.50"
+    if entry_price < 0.85:
+        return "0.50-0.85"
+    return ">=0.85"
+
+
+def _parse_iso(value: str):
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _close_mode_divergence_exists(store: SQLiteStore, run_row) -> bool:
+    if run_row is None:
+        return False
+    notes = str(run_row["notes"] or "")
+    if "close_mode=approximate-expiry" not in notes:
+        return False
+    current_pnl = float(run_row["realized_pnl"] or 0.0)
+    if current_pnl >= 0:
+        return False
+    run_notes = parse_config_notes(notes)
+    sibling_rows = store.rows(
+        """
+        SELECT * FROM runs
+        WHERE strategy = ? AND data_source = ? AND IFNULL(session_id, '') = IFNULL(?, '') AND run_id != ?
+        ORDER BY started_at DESC, rowid DESC
+        """,
+        (
+            str(run_row["strategy"]),
+            str(run_row["data_source"]),
+            str(run_row["session_id"]) if run_row["session_id"] else "",
+            str(run_row["run_id"]),
+        ),
+    )
+    keys = (
+        "active_only",
+        "tiny_profile",
+        "min_seconds_to_expiry_filter",
+        "max_seconds_to_expiry_filter",
+        "momentum_preset",
+        "momentum_side_filter",
+        "momentum_asset_filter",
+        "momentum_duration_filter",
+        "momentum_min_entry_price",
+        "momentum_max_entry_price",
+    )
+    for sibling in sibling_rows:
+        sibling_notes = parse_config_notes(str(sibling["notes"] or ""))
+        if sibling_notes.get("close_mode") != "mark-to-market":
+            continue
+        if any(run_notes.get(key, "none") != sibling_notes.get(key, "none") for key in keys):
+            continue
+        if float(sibling["realized_pnl"] or 0.0) > 0:
+            return True
+    return False
+
+
 def _run_warnings_and_verdicts(
     *,
     realized_pnl: float,
     closed_trades: int,
     average_edge: float,
+    average_edge_accepted: float | None,
     expectancy_per_trade: float | None,
     average_win: float | None,
     average_loss: float | None,
@@ -448,6 +636,8 @@ def _run_warnings_and_verdicts(
     low_price: dict[str, float | int],
     close_mode: str | None,
     approximate_expiry_settlements: int,
+    close_mode_divergence: bool,
+    all_closed_trades_lost: bool,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     warnings: list[str] = []
     verdicts: list[str] = []
@@ -469,6 +659,12 @@ def _run_warnings_and_verdicts(
         if low_price["pnl_below_0_05"] > 0.5 * realized_pnl or low_price["pnl_below_0_03"] > 0.3 * realized_pnl:
             warnings.append("LOW_PRICE_BINARY_TAIL_STRATEGY")
             low_price_warning = True
+    if close_mode_divergence:
+        warnings.append("CLOSE_MODE_DIVERGENCE")
+    if average_edge_accepted is not None and average_edge_accepted < 0:
+        warnings.append("ACCEPTED_EDGE_NEGATIVE")
+    if approximate_expiry_settlements > 0 and all_closed_trades_lost:
+        warnings.append("DIRECTIONAL_SIGNAL_FAILED")
     if tail_risk or low_price_warning:
         verdicts.append("TAIL_RISK_DOMINATED")
     if close_mode == "approximate-expiry" or approximate_expiry_settlements > 0:

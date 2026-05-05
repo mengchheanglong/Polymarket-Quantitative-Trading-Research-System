@@ -52,6 +52,12 @@ class AgentConfig:
     strategy: str = "momentum"
     close_mode: str = "expiry-if-known"
     tiny_profile: bool = False
+    momentum_preset: str | None = None
+    momentum_side_filter: str | None = None
+    momentum_asset_filter: str | None = None
+    momentum_duration_filter: str | None = None
+    momentum_min_entry_price: float | None = None
+    momentum_max_entry_price: float | None = None
     random_seed: int = 7
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
@@ -117,6 +123,16 @@ def load_config() -> AgentConfig:
         strategy=os.environ.get("STRATEGY", "momentum"),
         close_mode=os.environ.get("CLOSE_MODE", "expiry-if-known"),
         tiny_profile=parse_bool(os.environ.get("TINY_PROFILE"), default=False),
+        momentum_preset=os.environ.get("MOMENTUM_PRESET") or None,
+        momentum_side_filter=os.environ.get("MOMENTUM_SIDE_FILTER") or None,
+        momentum_asset_filter=os.environ.get("MOMENTUM_ASSET_FILTER") or None,
+        momentum_duration_filter=os.environ.get("MOMENTUM_DURATION_FILTER") or None,
+        momentum_min_entry_price=float(os.environ["MOMENTUM_MIN_ENTRY_PRICE"])
+        if os.environ.get("MOMENTUM_MIN_ENTRY_PRICE")
+        else None,
+        momentum_max_entry_price=float(os.environ["MOMENTUM_MAX_ENTRY_PRICE"])
+        if os.environ.get("MOMENTUM_MAX_ENTRY_PRICE")
+        else None,
         random_seed=int(os.environ.get("RANDOM_SEED", "7")),
         gamma_base_url=os.environ.get("GAMMA_BASE_URL", "https://gamma-api.polymarket.com"),
         clob_base_url=os.environ.get("CLOB_BASE_URL", "https://clob.polymarket.com"),

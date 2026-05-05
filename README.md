@@ -224,6 +224,33 @@ The hypothesis is narrow:
 
 This is still not proof of live profitability. Tail-risk metrics, concentration checks, and settlement-approximation warnings still apply to `stuck-markov` exactly as they do to the earlier momentum and pair-cost strategies.
 
+Phase 15 adds a focused audit path for tiny momentum because mark-to-market gains alone are not enough:
+
+```powershell
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry
+python -m src.main signal-audit --run-id <run_id>
+python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --active-only --tiny
+python -m src.main momentum-audit --source public --session-id <session_id> --tiny
+```
+
+The report and diagnostics now separate:
+
+- average edge across all opportunities
+- average edge for accepted trades only
+- average edge for skipped opportunities only
+- accepted-trade edge min/median/max
+- accepted trades by side, asset, duration, seconds-to-expiry bucket, and entry-price bucket
+
+This matters because a strategy can look active while still being directionally wrong or close-mode dependent. A positive mark-to-market result does not prove that the same entries survive an approximate-expiry check.
+
+New warnings include:
+
+- `CLOSE_MODE_DIVERGENCE`
+- `ACCEPTED_EDGE_NEGATIVE`
+- `DIRECTIONAL_SIGNAL_FAILED`
+
+Tiny momentum is still under audit. If approximate-expiry is weak while mark-to-market looks good, treat that as disagreement, not as proof of an edge.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

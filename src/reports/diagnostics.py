@@ -131,7 +131,10 @@ def _aggregate_for_runs(
         for row in store.market_audit_rows(source_filter=_single_value(run_rows, "data_source"), session_id=session_id)
     }
     skip_rows = [row for row in opportunity_rows if str(row["decision"]) == "SKIP"]
+    accepted_rows = [row for row in opportunity_rows if str(row["decision"]) == "TRADE"]
     edge_values = [float(row["edge"] or 0.0) for row in opportunity_rows]
+    accepted_edge_values = [float(row["edge"] or 0.0) for row in accepted_rows]
+    skipped_edge_values = [float(row["edge"] or 0.0) for row in skip_rows]
     spread_values = [float(row["spread"]) for row in opportunity_rows if row["spread"] is not None]
     seconds_to_expiry_values = [float(row["seconds_to_expiry"]) for row in opportunity_rows if row["seconds_to_expiry"] is not None]
     pair_cost_values = [
@@ -180,6 +183,11 @@ def _aggregate_for_runs(
     )
     exposure_values = [float(row["position_exposure"] or 0.0) for row in equity_rows]
     trades_per_market = Counter(str(row["market_slug"]) for row in trade_rows)
+    accepted_by_side = Counter(str(row["direction"]) for row in trade_rows)
+    accepted_by_asset = Counter(str(row["asset"]) for row in trade_rows)
+    accepted_by_duration = Counter(_duration_label(row) for row in trade_rows)
+    accepted_by_seconds_bucket = Counter(_seconds_bucket(_seconds_to_expiry_for_trade(row)) for row in trade_rows)
+    accepted_by_entry_price_bucket = Counter(_entry_price_bucket(float(row["entry_price"])) for row in trade_rows)
     return {
         "config": format_config_view(merged_config_view([row["notes"] for row in run_rows])),
         "total_opportunities": len(opportunity_rows),
@@ -190,6 +198,11 @@ def _aggregate_for_runs(
         "risk_skips": risk_skips,
         "risk_blocked_trades": sum(risk_skips.values()),
         "average_edge": _safe_avg(edge_values),
+        "average_edge_accepted": _safe_avg(accepted_edge_values),
+        "average_edge_skipped": _safe_avg(skipped_edge_values),
+        "accepted_edge_min": min(accepted_edge_values, default=None),
+        "accepted_edge_median": median(accepted_edge_values) if accepted_edge_values else None,
+        "accepted_edge_max": max(accepted_edge_values, default=None),
         "min_edge": min(edge_values, default=None),
         "max_edge": max(edge_values, default=None),
         "median_edge": median(edge_values) if edge_values else None,
@@ -212,6 +225,11 @@ def _aggregate_for_runs(
         "average_trade_size": _safe_avg(trade_sizes),
         "trades_per_market_avg": _safe_avg([float(value) for value in trades_per_market.values()]),
         "trades_per_market_max": max(trades_per_market.values(), default=0),
+        "accepted_by_side": dict(accepted_by_side),
+        "accepted_by_asset": dict(accepted_by_asset),
+        "accepted_by_duration": dict(accepted_by_duration),
+        "accepted_by_seconds_bucket": dict(accepted_by_seconds_bucket),
+        "accepted_by_entry_price_bucket": dict(accepted_by_entry_price_bucket),
         "cooldown_skips": skipped_by_reason.get("cooldown after loss", 0),
         "loss_limit_skips": skipped_by_reason.get("session loss limit reached", 0) + skipped_by_reason.get("daily loss limit reached", 0),
         "near_threshold": near_threshold,
@@ -244,6 +262,10 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
         f"median:{_fmt_float(values['median_edge'])}, max:{_fmt_float(values['max_edge'])}"
     )
     lines.append(
+        f"{indent}accepted_edge_stats=avg:{_fmt_float(values['average_edge_accepted'])}, skipped_avg:{_fmt_float(values['average_edge_skipped'])}, "
+        f"min:{_fmt_float(values['accepted_edge_min'])}, median:{_fmt_float(values['accepted_edge_median'])}, max:{_fmt_float(values['accepted_edge_max'])}"
+    )
+    lines.append(
         f"{indent}spread_stats=avg:{_fmt_float(values['average_spread'])}, min:{_fmt_float(values['min_spread'])}, "
         f"max:{_fmt_float(values['max_spread'])}"
     )
@@ -268,6 +290,11 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
         f"{indent}trade_size=avg:{_fmt_float(values['average_trade_size'])}, largest:{_fmt_float(values['largest_single_trade'])}, "
         f"trades_per_market_avg:{_fmt_float(values['trades_per_market_avg'])}, trades_per_market_max:{values['trades_per_market_max']}"
     )
+    lines.append(f"{indent}accepted_trades_by_side={_fmt_map(values['accepted_by_side'])}")
+    lines.append(f"{indent}accepted_trades_by_asset={_fmt_map(values['accepted_by_asset'])}")
+    lines.append(f"{indent}accepted_trades_by_duration={_fmt_map(values['accepted_by_duration'])}")
+    lines.append(f"{indent}accepted_trades_by_seconds_to_expiry_bucket={_fmt_map(values['accepted_by_seconds_bucket'])}")
+    lines.append(f"{indent}accepted_trades_by_entry_price_bucket={_fmt_map(values['accepted_by_entry_price_bucket'])}")
     lines.append(f"{indent}cooldown_skips={values['cooldown_skips']}")
     lines.append(f"{indent}loss_limit_skips={values['loss_limit_skips']}")
     lines.append(f"{indent}near_threshold={values['near_threshold']}")
@@ -437,13 +464,17 @@ def _seconds_to_expiry_for_trade(row: Any) -> float:
 
 
 def _seconds_bucket(seconds_to_expiry: float) -> str:
+    if seconds_to_expiry < 30:
+        return "<30"
     if seconds_to_expiry < 60:
-        return "<60"
+        return "30-60"
     if seconds_to_expiry < 120:
         return "60-120"
     if seconds_to_expiry < 180:
         return "120-180"
-    return "180+"
+    if seconds_to_expiry < 240:
+        return "180-240"
+    return "240+"
 
 
 def _entry_price_bucket(entry_price: float) -> str:
@@ -456,6 +487,19 @@ def _entry_price_bucket(entry_price: float) -> str:
     if entry_price < 0.25:
         return "0.10-0.25"
     return ">=0.25"
+
+
+def _duration_label(row: Any) -> str:
+    if not row["window_start"] or not row["window_end"]:
+        return "unknown"
+    start = datetime.fromisoformat(str(row["window_start"]).replace("Z", "+00:00"))
+    end = datetime.fromisoformat(str(row["window_end"]).replace("Z", "+00:00"))
+    minutes = (end - start).total_seconds() / 60.0
+    if 4.0 <= minutes <= 6.0:
+        return "5m"
+    if 14.0 <= minutes <= 16.0:
+        return "15m"
+    return "unknown"
 
 
 def _max_simultaneous_positions(trade_rows: list[Any]) -> int:

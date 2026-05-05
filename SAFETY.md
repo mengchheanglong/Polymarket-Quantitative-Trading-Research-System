@@ -33,7 +33,9 @@ Phase 1 is paper-only by design.
 - `--active-only` is a research filter only. It changes which stored market windows are evaluated; it does not loosen thresholds and does not create any execution path.
 - `--tiny` is a paper-only risk profile. It reduces fake notional and fake exposure; it does not connect the project to any venue or add an execution path.
 - `markov-report` and `stuck-markov` are paper-only analytics over stored market snapshots. They do not query authenticated APIs, do not place orders, and do not convert public observations into a live system.
+- `signal-audit`, `close-divergence`, and `momentum-audit` are paper-only audit commands. They replay stored snapshots or inspect stored runs only.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
+- Tiny momentum is not trusted just because mark-to-market looks positive. Phase 15 explicitly checks accepted-trade edge, side correctness at approximate expiry, and whether close-mode disagreement is large enough to invalidate the paper result.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
 - `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.
@@ -53,6 +55,7 @@ Report metrics are paper metrics only:
 - Stuck-state / Markov transitions are research heuristics only. A side price that stays near `0.74` for several cycles while BTC moves can still be noise, stale liquidity, or a misleading microstructure artifact.
 - `EXPIRED_UNRESOLVED` and `SETTLEMENT_UNAVAILABLE` are not fake profits. They are explicit paper outcomes for markets where replay cannot justify a settled result.
 - `approximate-expiry` is still research-only. It infers settlement from nearby stored exchange prices and can be wrong even when the accounting looks attractive.
+- `CLOSE_MODE_DIVERGENCE`, `ACCEPTED_EDGE_NEGATIVE`, and `DIRECTIONAL_SIGNAL_FAILED` are skepticism warnings, not trading signals. They exist to keep a paper result from being over-interpreted.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
 
