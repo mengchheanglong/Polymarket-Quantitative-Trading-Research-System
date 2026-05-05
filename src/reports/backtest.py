@@ -31,11 +31,18 @@ class BacktestReport:
     max_equity_drawdown: float
     max_position_exposure: float
     average_edge: float
+    average_pnl_per_trade: float | None
+    average_win: float | None
+    average_loss: float | None
+    profit_factor: float | None
+    expectancy_per_trade: float | None
     open_positions: int
     unresolved_positions: int
     settlement_unavailable: int
     approximate_expiry_settlements: int
     mark_to_market_settlements: int
+    risk_blocked_trades: int
+    session_loss_limit_status: str
     source_coverage: dict[str, int]
     quality_metrics: dict
 
@@ -70,6 +77,13 @@ class BacktestReport:
                 f"Max equity drawdown: ${self.max_equity_drawdown:.2f}",
                 f"Max position exposure: ${self.max_position_exposure:.2f}",
                 f"Average edge: {self.average_edge:.4f}",
+                f"Average PnL per trade: {_fmt_money(self.average_pnl_per_trade)}",
+                f"Average win: {_fmt_money(self.average_win)}",
+                f"Average loss: {_fmt_money(self.average_loss)}",
+                f"Profit factor: {_fmt_ratio(self.profit_factor)}",
+                f"Expectancy per trade: {_fmt_money(self.expectancy_per_trade)}",
+                f"Risk-blocked trades: {self.risk_blocked_trades}",
+                f"Session loss limit status: {self.session_loss_limit_status}",
                 f"Source coverage: {_format_map(self.source_coverage)}",
                 f"Failed collection attempts: {self.quality_metrics['failed_collection_attempts']}",
                 f"Total stale snapshots: {self.quality_metrics['total_stale_snapshots']}",
@@ -155,11 +169,18 @@ def build_backtest_report(
         max_equity_drawdown=report.max_equity_drawdown,
         max_position_exposure=report.max_position_exposure,
         average_edge=report.average_edge,
+        average_pnl_per_trade=report.average_pnl_per_trade,
+        average_win=report.average_win,
+        average_loss=report.average_loss,
+        profit_factor=report.profit_factor,
+        expectancy_per_trade=report.expectancy_per_trade,
         open_positions=report.open_positions,
         unresolved_positions=report.unresolved_positions,
         settlement_unavailable=report.settlement_unavailable,
         approximate_expiry_settlements=report.approximate_expiry_settlements,
         mark_to_market_settlements=report.mark_to_market_settlements,
+        risk_blocked_trades=report.risk_blocked_trades,
+        session_loss_limit_status=report.session_loss_limit_status,
         source_coverage=quality["source_coverage"],
         quality_metrics=quality,
     )
@@ -206,6 +227,7 @@ def _empty_report(source_filter: str, starting_balance: float) -> Report:
         total_equity=starting_balance,
         max_equity_drawdown=0.0,
         max_position_exposure=0.0,
+        max_position_exposure_pct=0.0,
         open_positions=0,
         closed_trades=0,
         unresolved_positions=0,
@@ -213,8 +235,15 @@ def _empty_report(source_filter: str, starting_balance: float) -> Report:
         approximate_expiry_settlements=0,
         mark_to_market_settlements=0,
         skipped_trades=0,
+        risk_blocked_trades=0,
         win_rate=0.0,
         average_edge=0.0,
+        average_pnl_per_trade=None,
+        average_win=None,
+        average_loss=None,
+        profit_factor=None,
+        expectancy_per_trade=None,
+        session_loss_limit_status="CLEAR",
     )
 
 
@@ -222,3 +251,17 @@ def _format_map(values: dict) -> str:
     if not values:
         return "none"
     return ", ".join(f"{key}={value}" for key, value in values.items())
+
+
+def _fmt_money(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:.2f}"
+
+
+def _fmt_ratio(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if value == float("inf"):
+        return "inf"
+    return f"{value:.2f}"

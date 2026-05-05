@@ -61,8 +61,8 @@ def test_compare_momentum_vs_pair_cost(tmp_path, capsys):
 
     stdout = capsys.readouterr().out
     assert "Strategy comparison" in stdout
-    assert "momentum | runs=1" in stdout
-    assert "pair-cost | runs=1" in stdout
+    assert "momentum | tiny_profile=false | close_mode=expiry-if-known | runs=1" in stdout
+    assert "pair-cost | tiny_profile=false | close_mode=expiry-if-known | runs=1" in stdout
     assert "accepted_trades=" in stdout
     assert "max_equity_drawdown=" in stdout
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.reports.config_view import format_config_view, merged_config_view
+from src.simulator.engine import RISK_BLOCK_REASONS
 from src.storage.sqlite import SQLiteStore
 
 
@@ -20,6 +21,7 @@ class Report:
     total_equity: float
     max_equity_drawdown: float
     max_position_exposure: float
+    max_position_exposure_pct: float
     open_positions: int
     closed_trades: int
     unresolved_positions: int
@@ -27,8 +29,15 @@ class Report:
     approximate_expiry_settlements: int
     mark_to_market_settlements: int
     skipped_trades: int
+    risk_blocked_trades: int
     win_rate: float
     average_edge: float
+    average_pnl_per_trade: float | None
+    average_win: float | None
+    average_loss: float | None
+    profit_factor: float | None
+    expectancy_per_trade: float | None
+    session_loss_limit_status: str
 
     def as_text(self) -> str:
         return "\n".join(
@@ -46,6 +55,7 @@ class Report:
                 f"Total fake equity: ${self.total_equity:.2f}",
                 f"Max equity drawdown: ${self.max_equity_drawdown:.2f}",
                 f"Max position exposure: ${self.max_position_exposure:.2f}",
+                f"Max position exposure pct: {self.max_position_exposure_pct:.2%}",
                 f"Open positions: {self.open_positions}",
                 f"Closed trades: {self.closed_trades}",
                 f"Unresolved positions: {self.unresolved_positions}",
@@ -53,8 +63,15 @@ class Report:
                 f"Approximate expiry settlements: {self.approximate_expiry_settlements}",
                 f"Mark-to-market settlements: {self.mark_to_market_settlements}",
                 f"Skipped trades: {self.skipped_trades}",
+                f"Risk-blocked trades: {self.risk_blocked_trades}",
                 f"Win rate: {self.win_rate:.2%}",
                 f"Average edge: {self.average_edge:.4f}",
+                f"Average PnL per trade: {_fmt_money(self.average_pnl_per_trade)}",
+                f"Average win: {_fmt_money(self.average_win)}",
+                f"Average loss: {_fmt_money(self.average_loss)}",
+                f"Profit factor: {_fmt_ratio(self.profit_factor)}",
+                f"Expectancy per trade: {_fmt_money(self.expectancy_per_trade)}",
+                f"Session loss limit status: {self.session_loss_limit_status}",
             ]
         )
 
@@ -87,6 +104,8 @@ def build_report(
     settlement_unavailable_rows = [row for row in trade_rows if row["status"] == "SETTLEMENT_UNAVAILABLE"]
     closed = len(closed_rows)
     wins = sum(1 for row in closed_rows if row["result"] == "WIN")
+    loss_rows = [row for row in closed_rows if float(row["pnl"] or 0.0) < 0.0]
+    win_rows = [row for row in closed_rows if float(row["pnl"] or 0.0) > 0.0]
     realized_pnl = sum(float(row["pnl"] or 0.0) for row in closed_rows)
     open_value = sum(float(row["shares"]) * float(row["entry_price"]) for row in open_rows)
     open_exposure = sum(float(row["total_cost"]) for row in open_rows)
@@ -141,6 +160,21 @@ def build_report(
     strategies = sorted({str(row["strategy"]) for row in run_rows}) if run_rows else []
     modes = sorted({str(row["mode"]) for row in run_rows}) if run_rows else []
     data_sources = sorted({str(row["data_source"]) for row in run_rows}) if run_rows else []
+    average_pnl_per_trade = realized_pnl / closed if closed else None
+    average_win = sum(float(row["pnl"] or 0.0) for row in win_rows) / len(win_rows) if win_rows else None
+    average_loss = sum(float(row["pnl"] or 0.0) for row in loss_rows) / len(loss_rows) if loss_rows else None
+    gross_wins = sum(float(row["pnl"] or 0.0) for row in win_rows)
+    gross_losses = abs(sum(float(row["pnl"] or 0.0) for row in loss_rows))
+    profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else (None if gross_wins == 0 else float("inf"))
+    expectancy_per_trade = average_pnl_per_trade
+    risk_blocked = sum(1 for row in skip_reason_rows(skip_source=run_ids, store=store) if row["reason"] in RISK_BLOCK_REASONS)
+    config_values = merged_config_view([row["notes"] for row in run_rows])
+    session_loss_limit = _float_or_none(config_values.get("session_loss_limit_usd"))
+    session_loss_limit_status = (
+        "TRIGGERED"
+        if session_loss_limit is not None and realized_pnl <= -session_loss_limit
+        else "CLEAR"
+    )
     return Report(
         scope=scope,
         strategy=_single_or_mixed(strategies),
@@ -154,6 +188,7 @@ def build_report(
         total_equity=total_equity,
         max_equity_drawdown=_max_drawdown(equity_values),
         max_position_exposure=max_exposure,
+        max_position_exposure_pct=(max_exposure / starting_balance) if starting_balance else 0.0,
         open_positions=len(open_rows),
         closed_trades=closed,
         unresolved_positions=len(unresolved_rows),
@@ -161,9 +196,26 @@ def build_report(
         approximate_expiry_settlements=sum(1 for row in closed_rows if row["close_mode"] == "approximate-expiry"),
         mark_to_market_settlements=sum(1 for row in closed_rows if row["status"] == "CLOSED_BY_MARK_TO_MARKET"),
         skipped_trades=int(skipped),
+        risk_blocked_trades=risk_blocked,
         win_rate=wins / closed if closed else 0.0,
         average_edge=avg_edge,
+        average_pnl_per_trade=average_pnl_per_trade,
+        average_win=average_win,
+        average_loss=average_loss,
+        profit_factor=profit_factor,
+        expectancy_per_trade=expectancy_per_trade,
+        session_loss_limit_status=session_loss_limit_status,
     )
+
+
+def skip_reason_rows(*, skip_source: list[str], store: SQLiteStore):
+    if skip_source:
+        placeholders = ",".join("?" for _ in skip_source)
+        return store.rows(
+            f"SELECT reason FROM opportunities WHERE decision = 'SKIP' AND run_id IN ({placeholders})",
+            tuple(skip_source),
+        )
+    return store.rows("SELECT reason FROM opportunities WHERE decision = 'SKIP'")
 
 
 def _resolve_run_rows(
@@ -212,3 +264,23 @@ def _single_or_mixed(values: list[str]) -> str:
     if not values:
         return "n/a"
     return values[0] if len(values) == 1 else "mixed"
+
+
+def _fmt_money(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:.2f}"
+
+
+def _fmt_ratio(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if value == float("inf"):
+        return "inf"
+    return f"{value:.2f}"
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if value in (None, "", "none", "n/a", "mixed"):
+        return None
+    return float(value)

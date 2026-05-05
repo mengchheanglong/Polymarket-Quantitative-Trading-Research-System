@@ -19,8 +19,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## Freqtrade
 
-- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, and clear separation between simulation and execution.
-- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, and active-window market filtering.
+- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, active-window market filtering, and tiny-position paper risk limits.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -28,7 +27,6 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## NautilusTrader
 
-- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, and future event replay design.
 - Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, lifecycle/state transitions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, diagnostics, research-session modeling, and future event replay design.
 - Do not copy yet: broker adapters, live venues, account integrations, or execution clients.
 - Safety warning: this project should borrow concepts such as explicit events and accounting, not live connectivity.

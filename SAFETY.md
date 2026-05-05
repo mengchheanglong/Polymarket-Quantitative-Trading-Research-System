@@ -31,6 +31,7 @@ Phase 1 is paper-only by design.
 - Session-scoped replay, diagnostics, sweeps, backtest reports, and exports stay inside the selected research session or explicit time window.
 - Replay close modes such as `mark-to-market`, `expiry-if-known`, and `approximate-expiry` are paper-only accounting choices. They do not place orders and do not turn stored public data into a real settlement feed.
 - `--active-only` is a research filter only. It changes which stored market windows are evaluated; it does not loosen thresholds and does not create any execution path.
+- `--tiny` is a paper-only risk profile. It reduces fake notional and fake exposure; it does not connect the project to any venue or add an execution path.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
 - `reset --all` deletes local research data, including raw snapshots. It still does not touch wallets or external systems.
@@ -45,6 +46,7 @@ Report metrics are paper metrics only:
 - `Total fake equity` is fake cash plus marked open simulated position value.
 - `Max equity drawdown` is calculated from equity snapshots, not raw cash drawdown from opening positions.
 - `Max position exposure` is reported separately from drawdown.
+- `Average PnL per trade`, `average win`, `average loss`, `profit factor`, and `expectancy per trade` are paper metrics only. They are accounting summaries, not evidence of live tradability.
 - `EXPIRED_UNRESOLVED` and `SETTLEMENT_UNAVAILABLE` are not fake profits. They are explicit paper outcomes for markets where replay cannot justify a settled result.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
@@ -52,5 +54,7 @@ Data quality metrics are paper research diagnostics only. They report snapshot c
 Skip-heavy results are not a failure by themselves. A paper-only engine that rejects negative-edge or wide-spread public opportunities is behaving more safely than one that forces simulated fills to manufacture activity.
 
 Not-started markets are not failed trade ideas. They are inventory observed before the valid entry window opened. Phase 11 separates those from active market windows so liquidity and strategy quality can be evaluated more honestly.
+
+Normal replay exposure can be much larger than a tiny real bankroll would tolerate. Phase 12 adds explicit paper caps for per-trade size, total open exposure, open-position count, market concentration, per-session trade count, cooldown after losses, and session or daily loss ceilings. These are discipline controls for research only.
 
 Source filters are safety and research-integrity controls. Use `--source public` when evaluating observed public data and `--source demo` when validating deterministic offline behavior. Mixed datasets are allowed in one SQLite file, but readiness and reports make the mix explicit so mock data is not mistaken for public market evidence.

@@ -21,6 +21,16 @@ class AgentConfig:
     starting_balance: float = 1_000.0
     max_position_pct: float = 0.05
     max_position_usd: float = 100.0
+    max_trade_usd: float = 100.0
+    max_total_exposure_usd: float = 1_000.0
+    max_open_positions: int = 100
+    max_trades_per_market: int = 100
+    max_trades_per_session: int = 10_000
+    session_loss_limit_usd: float = 1_000.0
+    daily_loss_limit_usd: float = 1_000.0
+    cooldown_after_loss_seconds: int = 0
+    min_seconds_to_expiry: int | None = None
+    max_seconds_to_expiry: int | None = None
     min_edge: float = 0.02
     max_spread: float = 0.10
     fee_bps: float = 10.0
@@ -35,6 +45,7 @@ class AgentConfig:
     use_demo_markets: bool = False
     strategy: str = "momentum"
     close_mode: str = "expiry-if-known"
+    tiny_profile: bool = False
     random_seed: int = 7
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
@@ -56,6 +67,8 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 def load_config() -> AgentConfig:
     load_dotenv()
     max_after = os.environ.get("MAX_SECONDS_AFTER_START")
+    min_to_expiry = os.environ.get("MIN_SECONDS_TO_EXPIRY")
+    max_to_expiry = os.environ.get("MAX_SECONDS_TO_EXPIRY")
     use_mock_data = parse_bool(os.environ.get("USE_MOCK_DATA"), default=False)
     use_demo_markets = parse_bool(os.environ.get("USE_DEMO_MARKETS"), default=False)
     return AgentConfig(
@@ -65,6 +78,16 @@ def load_config() -> AgentConfig:
         starting_balance=float(os.environ.get("STARTING_BALANCE", "1000")),
         max_position_pct=float(os.environ.get("MAX_POSITION_PCT", "0.05")),
         max_position_usd=float(os.environ.get("MAX_POSITION_USD", "100")),
+        max_trade_usd=float(os.environ.get("MAX_TRADE_USD", "100")),
+        max_total_exposure_usd=float(os.environ.get("MAX_TOTAL_EXPOSURE_USD", "1000")),
+        max_open_positions=int(os.environ.get("MAX_OPEN_POSITIONS", "100")),
+        max_trades_per_market=int(os.environ.get("MAX_TRADES_PER_MARKET", "100")),
+        max_trades_per_session=int(os.environ.get("MAX_TRADES_PER_SESSION", "10000")),
+        session_loss_limit_usd=float(os.environ.get("SESSION_LOSS_LIMIT_USD", "1000")),
+        daily_loss_limit_usd=float(os.environ.get("DAILY_LOSS_LIMIT_USD", "1000")),
+        cooldown_after_loss_seconds=int(os.environ.get("COOLDOWN_AFTER_LOSS_SECONDS", "0")),
+        min_seconds_to_expiry=int(min_to_expiry) if min_to_expiry else None,
+        max_seconds_to_expiry=int(max_to_expiry) if max_to_expiry else None,
         min_edge=float(os.environ.get("MIN_EDGE", "0.02")),
         max_spread=float(os.environ.get("MAX_SPREAD", "0.10")),
         fee_bps=float(os.environ.get("FEE_BPS", "10")),
@@ -81,6 +104,7 @@ def load_config() -> AgentConfig:
         use_demo_markets=use_mock_data or use_demo_markets,
         strategy=os.environ.get("STRATEGY", "momentum"),
         close_mode=os.environ.get("CLOSE_MODE", "expiry-if-known"),
+        tiny_profile=parse_bool(os.environ.get("TINY_PROFILE"), default=False),
         random_seed=int(os.environ.get("RANDOM_SEED", "7")),
         gamma_base_url=os.environ.get("GAMMA_BASE_URL", "https://gamma-api.polymarket.com"),
         clob_base_url=os.environ.get("CLOB_BASE_URL", "https://clob.polymarket.com"),

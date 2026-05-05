@@ -149,11 +149,11 @@ def test_compare_source_filters_demo_and_public(tmp_path, capsys):
     assert main(["--db", str(db_path), "compare", "--source", "demo"]) == 0
     demo_out = capsys.readouterr().out
     assert "Source filter: demo" in demo_out
-    assert "Aggregate by strategy:" in demo_out
+    assert "Aggregate by strategy/profile:" in demo_out
     assert "momentum" in demo_out
 
     assert main(["--db", str(db_path), "compare", "--source", "public"]) == 0
     public_out = capsys.readouterr().out
     assert "Source filter: public" in public_out
-    assert "Latest runs:" in public_out
+    assert "Recent runs:" in public_out
     assert "momentum" in public_out

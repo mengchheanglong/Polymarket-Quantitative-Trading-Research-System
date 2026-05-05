@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--active-only", action="store_true", help="Replay only markets inside a valid active trading window with stored orderbooks.")
     replay_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
+    replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
     replay_parser.add_argument(
         "--close-mode",
         choices=("none", "mark-to-market", "expiry-if-known", "approximate-expiry"),
@@ -103,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     compare_parser.add_argument("--session-id", help="Filter runs for a research session.")
     compare_parser.add_argument("--active-only", action="store_true", help="Compare only runs created with --active-only.")
+    compare_parser.add_argument("--tiny", action="store_true", help="Compare only runs created with the tiny-position profile.")
     diagnostics_parser = subcommands.add_parser("diagnostics", help="Explain accepted/skipped paper opportunities")
     diagnostics_parser.add_argument("--run-id", help="Inspect a specific run.")
     diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Filter by strategy.")
@@ -176,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _replace_strategy(config, args.strategy)
     if getattr(args, "close_mode", None):
         config = _replace_close_mode(config, args.close_mode)
+    if getattr(args, "tiny", False) and args.command in {"replay", "run-paper"}:
+        config = _replace_tiny_profile(config)
 
     try:
         enforce_paper_only(config.dry_run, config.execution_mode)
@@ -686,6 +690,7 @@ def replay(config: AgentConfig, args) -> int:
     try:
         source_filter = _clean_source_filter(getattr(args, "source", None))
         session_id, since, until = _resolved_time_filters(store, args)
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
         outcome = _simulate_replay(
             config,
             source_filter=source_filter,
@@ -693,8 +698,8 @@ def replay(config: AgentConfig, args) -> int:
             until=until,
             session_id=session_id,
             active_only=bool(getattr(args, "active_only", False)),
-            min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
-            max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
+            min_seconds_to_expiry=min_seconds_to_expiry,
+            max_seconds_to_expiry=max_seconds_to_expiry,
             now=now,
             data_store=store,
             result_store=store,
@@ -778,6 +783,7 @@ def compare(config: AgentConfig, args) -> int:
                 source_filter=_clean_source_filter(getattr(args, "source", None)),
                 session_id=getattr(args, "session_id", None),
                 active_only=bool(getattr(args, "active_only", False)),
+                tiny_only=bool(getattr(args, "tiny", False)),
             )
         )
     finally:
@@ -789,6 +795,7 @@ def diagnostics(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         session_id, since, until = _resolved_time_filters(store, args)
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
         print(
             build_diagnostics(
                 store,
@@ -800,8 +807,8 @@ def diagnostics(config: AgentConfig, args) -> int:
                 since=since,
                 until=until,
                 active_only=bool(getattr(args, "active_only", False)),
-                min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
-                max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
+                min_seconds_to_expiry=min_seconds_to_expiry,
+                max_seconds_to_expiry=max_seconds_to_expiry,
             )
         )
     finally:
@@ -815,6 +822,7 @@ def sweep(config: AgentConfig, args) -> int:
     data_store = SQLiteStore(config.database_path)
     try:
         session_id, since, until = _resolved_time_filters(data_store, args)
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
         rows: list[SweepRow] = []
         for override in _sweep_configs(config, strategy):
             with tempfile.TemporaryDirectory(prefix="paper-sweep-") as temp_dir:
@@ -827,8 +835,8 @@ def sweep(config: AgentConfig, args) -> int:
                         until=until,
                         session_id=session_id,
                         active_only=bool(getattr(args, "active_only", False)),
-                        min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
-                        max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
+                        min_seconds_to_expiry=min_seconds_to_expiry,
+                        max_seconds_to_expiry=max_seconds_to_expiry,
                         now=datetime.now(timezone.utc),
                         data_store=data_store,
                         result_store=scratch,
@@ -1002,6 +1010,7 @@ def active_markets(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         session_id, since, until = _resolved_time_filters(store, args)
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
         print(
             build_active_market_report(
                 store,
@@ -1010,8 +1019,8 @@ def active_markets(config: AgentConfig, args) -> int:
                 since=since,
                 until=until,
                 session_id=session_id,
-                min_seconds_to_expiry=getattr(args, "min_seconds_to_expiry", None),
-                max_seconds_to_expiry=getattr(args, "max_seconds_to_expiry", None),
+                min_seconds_to_expiry=min_seconds_to_expiry,
+                max_seconds_to_expiry=max_seconds_to_expiry,
             )
         )
     finally:
@@ -1129,6 +1138,9 @@ def _run_replay_momentum(
     data_store: SQLiteStore,
     markets,
     *,
+    close_mode: str,
+    settlement_prices,
+    status_counts: dict[str, int],
     source_filter: str | None,
     session_id: str | None,
 ) -> tuple[int, int]:
@@ -1137,6 +1149,20 @@ def _run_replay_momentum(
     skipped = 0
     for market in markets:
         observed_at = market.observed_at or market.window.start
+        _merge_close_counts(
+            status_counts,
+            _close_replay_positions(
+                config,
+                engine,
+                data_store,
+                close_mode=close_mode,
+                replay_end=observed_at,
+                count_open=False,
+                source_filter=source_filter,
+                session_id=session_id,
+                settlement_prices=settlement_prices,
+            ),
+        )
         price_snapshot = data_store.latest_price(
             market.asset.value,
             source_filter=source_filter,
@@ -1202,6 +1228,9 @@ def _run_replay_pair_cost(
     data_store: SQLiteStore,
     markets,
     *,
+    close_mode: str,
+    settlement_prices,
+    status_counts: dict[str, int],
     source_filter: str | None,
     session_id: str | None,
 ) -> tuple[int, int]:
@@ -1216,6 +1245,20 @@ def _run_replay_pair_cost(
     skipped = 0
     for market in markets:
         observed_at = market.observed_at or market.window.start
+        _merge_close_counts(
+            status_counts,
+            _close_replay_positions(
+                config,
+                engine,
+                data_store,
+                close_mode=close_mode,
+                replay_end=observed_at,
+                count_open=False,
+                source_filter=source_filter,
+                session_id=session_id,
+                settlement_prices=settlement_prices,
+            ),
+        )
         price_snapshot = data_store.latest_price(
             market.asset.value,
             source_filter=source_filter,
@@ -1305,6 +1348,7 @@ def _close_replay_positions(
     *,
     close_mode: str,
     replay_end: datetime,
+    count_open: bool,
     source_filter: str | None,
     session_id: str | None,
     settlement_prices,
@@ -1331,7 +1375,8 @@ def _close_replay_positions(
             if midpoint is None:
                 status = "SETTLEMENT_UNAVAILABLE" if replay_end >= window_end else "OPEN"
                 if status == "OPEN":
-                    status_counts["open"] += 1
+                    if count_open:
+                        status_counts["open"] += 1
                     continue
                 engine.close_position(
                     now=close_at,
@@ -1363,7 +1408,8 @@ def _close_replay_positions(
             continue
 
         if replay_end < window_end:
-            status_counts["open"] += 1
+            if count_open:
+                status_counts["open"] += 1
             continue
 
         if close_mode == "approximate-expiry":
@@ -1558,12 +1604,22 @@ def _simulate_replay(
     engine = PaperTradingEngine(config, result_store, run_id=run_id)
     engine.record_equity(now)
     if mode in {"replay", "sweep"}:
+        close_counts = {
+            "closed_by_mark_to_market": 0,
+            "closed_by_expiry": 0,
+            "expired_unresolved": 0,
+            "settlement_unavailable": 0,
+            "open": 0,
+        }
         if config.strategy == "pair-cost":
             accepted, skipped = _run_replay_pair_cost(
                 config,
                 engine,
                 data_store,
                 markets,
+                close_mode=config.close_mode,
+                settlement_prices=settlement_prices,
+                status_counts=close_counts,
                 source_filter=source_filter,
                 session_id=session_id,
             )
@@ -1573,18 +1629,25 @@ def _simulate_replay(
                 engine,
                 data_store,
                 markets,
+                close_mode=config.close_mode,
+                settlement_prices=settlement_prices,
+                status_counts=close_counts,
                 source_filter=source_filter,
                 session_id=session_id,
             )
-        close_counts = _close_replay_positions(
-            config,
-            engine,
-            data_store,
-            close_mode=config.close_mode,
-            replay_end=replay_end,
-            source_filter=source_filter,
-            session_id=session_id,
-            settlement_prices=settlement_prices,
+        _merge_close_counts(
+            close_counts,
+            _close_replay_positions(
+                config,
+                engine,
+                data_store,
+                close_mode=config.close_mode,
+                replay_end=replay_end,
+                count_open=True,
+                source_filter=source_filter,
+                session_id=session_id,
+                settlement_prices=settlement_prices,
+            ),
         )
         closed = close_counts["closed_by_expiry"] + close_counts["closed_by_mark_to_market"]
         finished_at = replay_end
@@ -1718,6 +1781,7 @@ def _load_replay_context(
         )
         for item in selected
     ]
+    markets.sort(key=lambda market: (market.observed_at or market.window.start, market.window.end, market.slug))
     settlement_prices = _stored_settlement_prices(store, source_filter=source_filter, since=since, until=until, session_id=session_id)
     actual_sources = [str(row["source_name"]) for row in store.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)]
     return (
@@ -1969,11 +2033,45 @@ def _config_notes(config: AgentConfig) -> str:
     return (
         f"min_edge={config.min_edge}; max_spread={config.max_spread}; fee_bps={config.fee_bps}; "
         f"slippage_bps={config.slippage_bps}; max_position_pct={config.max_position_pct}; "
-        f"max_position_usd={config.max_position_usd}; failed_fill_probability={config.failed_fill_probability}; "
+        f"max_position_usd={config.max_position_usd}; max_trade_usd={config.max_trade_usd}; "
+        f"max_total_exposure_usd={config.max_total_exposure_usd}; max_open_positions={config.max_open_positions}; "
+        f"max_trades_per_market={config.max_trades_per_market}; max_trades_per_session={config.max_trades_per_session}; "
+        f"session_loss_limit_usd={config.session_loss_limit_usd}; daily_loss_limit_usd={config.daily_loss_limit_usd}; "
+        f"cooldown_after_loss_seconds={config.cooldown_after_loss_seconds}; "
+        f"min_seconds_to_expiry={config.min_seconds_to_expiry if config.min_seconds_to_expiry is not None else 'none'}; "
+        f"max_seconds_to_expiry={config.max_seconds_to_expiry if config.max_seconds_to_expiry is not None else 'none'}; "
+        f"failed_fill_probability={config.failed_fill_probability}; "
         f"pair_cost_threshold={config.pair_cost_threshold}; "
         f"pair_cost_failed_second_leg_probability={config.pair_cost_failed_second_leg_probability}; "
-        f"close_mode={config.close_mode}"
+        f"close_mode={config.close_mode}; tiny_profile={'true' if config.tiny_profile else 'false'}"
     )
+
+
+def _replace_tiny_profile(config: AgentConfig) -> AgentConfig:
+    return _replace_config_values(
+        config,
+        max_trade_usd=1.0,
+        max_total_exposure_usd=10.0,
+        max_open_positions=5,
+        max_trades_per_market=1,
+        max_trades_per_session=100,
+        session_loss_limit_usd=5.0,
+        daily_loss_limit_usd=10.0,
+        cooldown_after_loss_seconds=300,
+        min_seconds_to_expiry=30,
+        max_seconds_to_expiry=240,
+        tiny_profile=True,
+    )
+
+
+def _effective_expiry_filters(config: AgentConfig, args) -> tuple[int | None, int | None]:
+    min_seconds = getattr(args, "min_seconds_to_expiry", None)
+    max_seconds = getattr(args, "max_seconds_to_expiry", None)
+    if min_seconds is None:
+        min_seconds = config.min_seconds_to_expiry
+    if max_seconds is None:
+        max_seconds = config.max_seconds_to_expiry
+    return min_seconds, max_seconds
 
 
 def _sweep_configs(config: AgentConfig, strategy: str) -> list[AgentConfig]:
@@ -2153,6 +2251,11 @@ class _StoredOrderBookSource:
             until=self.until,
             session_id=self.session_id,
         )
+
+
+def _merge_close_counts(target: dict[str, int], update: dict[str, int]) -> None:
+    for key, value in update.items():
+        target[key] = target.get(key, 0) + value
 
 
 if __name__ == "__main__":

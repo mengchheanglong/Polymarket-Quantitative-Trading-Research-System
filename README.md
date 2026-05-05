@@ -45,6 +45,8 @@ python -m src.main export --format csv --out exports --source public
 - Resolution result and fake PnL
 - Starting balance, current cash balance, realized fake PnL, unrealized fake PnL, total fake equity
 - Max equity drawdown, max position exposure, win rate, average edge, skipped-trade count
+- Average PnL per trade, average win, average loss, profit factor, expectancy per trade
+- Risk-blocked trades, max exposure as a bankroll percentage, and session loss-limit status
 
 ## Paper Strategies
 
@@ -153,6 +155,32 @@ python -m src.main replay --strategy momentum --source public --session-id <sess
 ```
 
 `active-markets` reports active BTC/ETH counts, 5m vs 15m mix, lifecycle counts, complete YES/NO orderbook counts, missing asks/bids, wide spreads, low liquidity, pair cost, and fee/slippage-adjusted pair cost. Missing asks matter: a pair-cost setup without both asks is not executable even in paper research.
+
+Phase 12 adds tiny-position paper-risk controls so replay can be evaluated against a small-bankroll plan instead of the older larger notional defaults:
+
+```powershell
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --close-mode approximate-expiry --tiny
+python -m src.main replay --strategy pair-cost --source public --session-id <session_id> --active-only --tiny
+python -m src.main compare --source public --session-id <session_id> --active-only
+python -m src.main compare --source public --session-id <session_id> --active-only --tiny
+```
+
+The tiny profile applies a paper-only risk template:
+
+- `MAX_TRADE_USD=1.00`
+- `MAX_TOTAL_EXPOSURE_USD=10.00`
+- `MAX_OPEN_POSITIONS=5`
+- `MAX_TRADES_PER_MARKET=1`
+- `MAX_TRADES_PER_SESSION=100`
+- `SESSION_LOSS_LIMIT_USD=5.00`
+- `DAILY_LOSS_LIMIT_USD=10.00`
+- `COOLDOWN_AFTER_LOSS_SECONDS=300`
+- `MIN_SECONDS_TO_EXPIRY=30`
+- `MAX_SECONDS_TO_EXPIRY=240`
+
+Tiny mode does not create execution. It only changes paper sizing and replay admission rules. If a trade is blocked by exposure, open-position count, market count, session loss, daily loss, or cooldown, diagnostics record that explicitly.
+
+Win rate alone is not enough. Expectancy per trade, average win versus average loss, profit factor, and realized PnL all matter. A strategy can show a decent win rate and still be weak once costs and losses are measured honestly.
 
 ## Observe And Dataset Building
 

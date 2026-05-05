@@ -8,6 +8,7 @@ from typing import Any
 from src.config import AgentConfig
 from src.reports.active_markets import select_market_snapshots, summarize_liquidity, summarize_timing
 from src.reports.config_view import format_config_view, merged_config_view, parse_config_notes
+from src.simulator.engine import RISK_BLOCK_REASONS
 from src.storage.sqlite import SQLiteStore
 
 
@@ -153,12 +154,29 @@ def _aggregate_for_runs(
     timing["missing_current_price"] = sum(
         1 for row in opportunity_rows if str(row["strategy"]) == "momentum" and str(row["reason"]) in {"missing market price", "public orderbook unavailable"}
     )
+    strategy_skips = {reason: count for reason, count in skipped_by_reason.items() if reason not in RISK_BLOCK_REASONS}
+    risk_skips = {reason: count for reason, count in skipped_by_reason.items() if reason in RISK_BLOCK_REASONS}
+    trade_sizes = [float(row["total_cost"] or 0.0) for row in trade_rows]
+    equity_rows = store.rows(
+        f"""
+        SELECT observed_at, total_equity, position_exposure
+        FROM equity_snapshots
+        WHERE run_id IN ({placeholders})
+        ORDER BY observed_at, id
+        """,
+        tuple(run_ids),
+    )
+    exposure_values = [float(row["position_exposure"] or 0.0) for row in equity_rows]
+    trades_per_market = Counter(str(row["market_slug"]) for row in trade_rows)
     return {
         "config": format_config_view(merged_config_view([row["notes"] for row in run_rows])),
         "total_opportunities": len(opportunity_rows),
         "accepted_trades": len(trade_rows),
         "skipped_opportunities": len(skip_rows),
         "skipped_by_reason": dict(skipped_by_reason),
+        "strategy_skips": strategy_skips,
+        "risk_skips": risk_skips,
+        "risk_blocked_trades": sum(risk_skips.values()),
         "average_edge": _safe_avg(edge_values),
         "min_edge": min(edge_values, default=None),
         "max_edge": max(edge_values, default=None),
@@ -175,6 +193,15 @@ def _aggregate_for_runs(
         "timing_buckets": dict(timing_buckets),
         "liquidity": liquidity,
         "momentum_timing": timing,
+        "exposure_avg": _safe_avg(exposure_values),
+        "exposure_max": max(exposure_values, default=None),
+        "max_simultaneous_positions": _max_simultaneous_positions(trade_rows),
+        "largest_single_trade": max(trade_sizes, default=None),
+        "average_trade_size": _safe_avg(trade_sizes),
+        "trades_per_market_avg": _safe_avg([float(value) for value in trades_per_market.values()]),
+        "trades_per_market_max": max(trades_per_market.values(), default=0),
+        "cooldown_skips": skipped_by_reason.get("cooldown after loss", 0),
+        "loss_limit_skips": skipped_by_reason.get("session loss limit reached", 0) + skipped_by_reason.get("daily loss limit reached", 0),
         "near_threshold": near_threshold,
         "markets_with_most_skips": markets_with_skips.most_common(5),
         "edge_distribution": _bucket_edges(edge_values),
@@ -190,6 +217,9 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
     lines.append(f"{indent}accepted_trades={values['accepted_trades']}")
     lines.append(f"{indent}skipped_opportunities={values['skipped_opportunities']}")
     lines.append(f"{indent}skipped_by_reason={_fmt_map(values['skipped_by_reason'])}")
+    lines.append(f"{indent}strategy_skips={_fmt_map(values['strategy_skips'])}")
+    lines.append(f"{indent}risk_skips={_fmt_map(values['risk_skips'])}")
+    lines.append(f"{indent}risk_blocked_trades={values['risk_blocked_trades']}")
     lines.append(
         f"{indent}edge_stats=avg:{_fmt_float(values['average_edge'])}, min:{_fmt_float(values['min_edge'])}, "
         f"median:{_fmt_float(values['median_edge'])}, max:{_fmt_float(values['max_edge'])}"
@@ -211,6 +241,16 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
         lines.append(f"{indent}liquidity={_fmt_map(values['liquidity'])}")
     if values["momentum_timing"]:
         lines.append(f"{indent}momentum_timing={_fmt_map(values['momentum_timing'])}")
+    lines.append(
+        f"{indent}exposure=avg:{_fmt_float(values['exposure_avg'])}, max:{_fmt_float(values['exposure_max'])}, "
+        f"max_simultaneous_positions={values['max_simultaneous_positions']}"
+    )
+    lines.append(
+        f"{indent}trade_size=avg:{_fmt_float(values['average_trade_size'])}, largest:{_fmt_float(values['largest_single_trade'])}, "
+        f"trades_per_market_avg:{_fmt_float(values['trades_per_market_avg'])}, trades_per_market_max:{values['trades_per_market_max']}"
+    )
+    lines.append(f"{indent}cooldown_skips={values['cooldown_skips']}")
+    lines.append(f"{indent}loss_limit_skips={values['loss_limit_skips']}")
     lines.append(f"{indent}near_threshold={values['near_threshold']}")
     lines.append(f"{indent}markets_with_most_skips={_fmt_pairs(values['markets_with_most_skips'])}")
     lines.append(f"{indent}edge_distribution={_fmt_map(values['edge_distribution'])}")
@@ -357,6 +397,22 @@ def _safe_avg(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _max_simultaneous_positions(trade_rows: list[Any]) -> int:
+    events: list[tuple[str, int]] = []
+    for row in trade_rows:
+        opened_at = str(row["opened_at"])
+        events.append((opened_at, 1))
+        closed_at = row["closed_at"]
+        if closed_at:
+            events.append((str(closed_at), -1))
+    current = 0
+    maximum = 0
+    for _, delta in sorted(events, key=lambda item: (item[0], item[1])):
+        current += delta
+        maximum = max(maximum, current)
+    return maximum
 
 
 def _fmt_float(value: float | None) -> str:
