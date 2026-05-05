@@ -19,7 +19,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## Freqtrade
 
-- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, active-window market filtering, and tiny-position paper risk limits.
+- Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, active-window market filtering, tiny-position paper risk limits, and skeptical analysis of whether reported gains are concentrated in a few outsized trades.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -27,7 +27,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## NautilusTrader
 
-- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, lifecycle/state transitions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, diagnostics, research-session modeling, and future event replay design.
+- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, lifecycle/state transitions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, diagnostics, research-session modeling, settlement-state handling, and future event replay design.
 - Do not copy yet: broker adapters, live venues, account integrations, or execution clients.
 - Safety warning: this project should borrow concepts such as explicit events and accounting, not live connectivity.
 - Phase: Phase 3 as architectural inspiration for replay boundaries; Phase 6 for explicit demo/public data boundaries; later for richer event modeling.
@@ -40,3 +40,30 @@ These are design references only. They do not authorize live trading, wallet sup
 - Safety warning: any AI workflow in this repo must remain bounded to paper research and transparent logging.
 - Phase: Phase 2 for documentation inspiration; Phase 6 for source-aware research workflow ideas; later for research workflow ideas.
 - Source: http://github.com/randomness11/probablyprofit
+
+## aulekator/Polymarket-BTC-15-Minute-Trading-Bot
+
+Purpose:
+Architecture reference for a BTC 15-minute Polymarket bot.
+
+Useful ideas:
+- 15-minute BTC-only strategy focus
+- multi-signal architecture
+- risk-first config
+- monitoring with Prometheus/Grafana
+- simulation/live separation pattern
+- NautilusTrader-style architecture ideas
+
+Do not copy yet:
+- live execution
+- wallet/private-key handling
+- simulation/live toggle
+- self-learning live optimization
+- any code that can place orders
+
+Relevant future phases:
+- Phase 14+: strategy signal design
+- Phase 15+: monitoring/reporting
+- Phase 17+: live-executor design review, separate from paper engine
+
+Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

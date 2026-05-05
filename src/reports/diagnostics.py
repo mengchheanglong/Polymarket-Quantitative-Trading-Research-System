@@ -22,6 +22,7 @@ def build_diagnostics(
     since: datetime | None = None,
     until: datetime | None = None,
     active_only: bool = False,
+    tiny_only: bool = False,
     min_seconds_to_expiry: int | None = None,
     max_seconds_to_expiry: int | None = None,
 ) -> str:
@@ -32,6 +33,7 @@ def build_diagnostics(
         source_filter=source_filter,
         session_id=session_id,
         active_only=active_only,
+        tiny_only=tiny_only,
     )
     scope = _scope_label(run_rows, run_id=run_id, strategy=strategy, source_filter=source_filter, session_id=session_id)
     lines = ["Strategy diagnostics", f"Scope: {scope}"]
@@ -266,6 +268,7 @@ def _matching_run_rows(
     source_filter: str | None = None,
     session_id: str | None = None,
     active_only: bool = False,
+    tiny_only: bool = False,
 ) -> list[Any]:
     if run_id:
         row = store.run_by_id(run_id)
@@ -284,6 +287,9 @@ def _matching_run_rows(
     if active_only:
         clauses.append("notes LIKE ?")
         params.append("%active_only=true%")
+    if tiny_only:
+        clauses.append("notes LIKE ?")
+        params.append("%tiny_profile=true%")
     if clauses:
         where = " WHERE " + " AND ".join(clauses)
         return store.rows(f"SELECT * FROM runs{where} ORDER BY started_at, rowid", tuple(params))

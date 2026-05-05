@@ -20,6 +20,7 @@ from src.reports.compare import build_strategy_comparison
 from src.reports.dataset import build_dataset_summary
 from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
+from src.reports.settlement import build_settlement_report
 from src.reports.summary import build_report
 from src.reports.sweep import SweepRow, build_sweep_report
 from src.safety import SafetyError, enforce_paper_only
@@ -99,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser.add_argument("--until", help="Only summarize snapshots at or before this UTC ISO timestamp.")
     backtest_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     backtest_parser.add_argument("--active-only", action="store_true", help="Summarize active-only replay runs for the selected scope.")
+    backtest_parser.add_argument("--tiny", action="store_true", help="Summarize only tiny-profile replay runs for the selected scope.")
     subcommands.add_parser("runs", help="List experiment runs")
     compare_parser = subcommands.add_parser("compare", help="Compare stored strategies by run metadata")
     compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
@@ -111,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     diagnostics_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     diagnostics_parser.add_argument("--session-id", help="Filter runs for a research session.")
     diagnostics_parser.add_argument("--active-only", action="store_true", help="Filter to runs created with --active-only and show active-market liquidity diagnostics.")
+    diagnostics_parser.add_argument("--tiny", action="store_true", help="Filter to runs created with the tiny-position profile.")
     diagnostics_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
     diagnostics_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     sweep_parser = subcommands.add_parser("sweep", help="Run a paper-only threshold sweep on stored snapshots")
@@ -167,6 +170,19 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--since", help="Only export raw snapshots at or after this UTC ISO timestamp.")
     export_parser.add_argument("--until", help="Only export raw snapshots at or before this UTC ISO timestamp.")
     export_parser.add_argument("--session-id", help="Export only data tied to a research session when possible.")
+    close_mode_compare_parser = subcommands.add_parser("close-mode-compare", help="Compare replay close modes on stored snapshots")
+    close_mode_compare_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), required=True)
+    close_mode_compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    close_mode_compare_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
+    close_mode_compare_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
+    close_mode_compare_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
+    close_mode_compare_parser.add_argument("--active-only", action="store_true")
+    close_mode_compare_parser.add_argument("--tiny", action="store_true")
+    close_mode_compare_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
+    close_mode_compare_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
+    settlement_report_parser = subcommands.add_parser("settlement-report", help="Inspect approximate-expiry settlement inputs for a run")
+    settlement_report_parser.add_argument("--run-id", help="Inspect a specific run.")
+    settlement_report_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -178,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         config = _replace_strategy(config, args.strategy)
     if getattr(args, "close_mode", None):
         config = _replace_close_mode(config, args.close_mode)
-    if getattr(args, "tiny", False) and args.command in {"replay", "run-paper"}:
+    if getattr(args, "tiny", False) and args.command in {"replay", "run-paper", "close-mode-compare"}:
         config = _replace_tiny_profile(config)
 
     try:
@@ -225,6 +241,10 @@ def main(argv: list[str] | None = None) -> int:
             return discover_markets(config, args)
         if args.command == "export":
             return export_data(config, args)
+        if args.command == "close-mode-compare":
+            return close_mode_compare(config, args)
+        if args.command == "settlement-report":
+            return settlement_report(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -738,6 +758,7 @@ def backtest_report(config: AgentConfig, args) -> int:
                 until=until,
                 session_id=session_id,
                 active_only=bool(getattr(args, "active_only", False)),
+                tiny_only=bool(getattr(args, "tiny", False)),
             ).as_text()
         )
     finally:
@@ -807,6 +828,7 @@ def diagnostics(config: AgentConfig, args) -> int:
                 since=since,
                 until=until,
                 active_only=bool(getattr(args, "active_only", False)),
+                tiny_only=bool(getattr(args, "tiny", False)),
                 min_seconds_to_expiry=min_seconds_to_expiry,
                 max_seconds_to_expiry=max_seconds_to_expiry,
             )
@@ -917,6 +939,90 @@ def export_data(config: AgentConfig, args) -> int:
         print("Export complete.")
         for path in paths:
             print(str(path))
+    finally:
+        store.close()
+    return 0
+
+
+def close_mode_compare(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None))
+    data_store = SQLiteStore(config.database_path)
+    try:
+        session_id, since, until = _resolved_time_filters(data_store, args)
+        min_seconds_to_expiry, max_seconds_to_expiry = _effective_expiry_filters(config, args)
+        lines = [
+            "Close mode comparison",
+            "Research only: stored-snapshot replay. No external APIs and no execution.",
+            f"Strategy: {getattr(args, 'strategy')}",
+            f"Source filter: {source_filter or 'all'}",
+            f"Session ID: {session_id or 'none'}",
+            f"Active only: {bool(getattr(args, 'active_only', False))}",
+            f"Tiny: {bool(getattr(args, 'tiny', False))}",
+        ]
+        for close_mode in ("none", "mark-to-market", "approximate-expiry", "expiry-if-known"):
+            override = _replace_close_mode(config, close_mode)
+            with tempfile.TemporaryDirectory(prefix="close-mode-compare-") as temp_dir:
+                scratch = SQLiteStore(Path(temp_dir) / "compare.sqlite3")
+                try:
+                    outcome = _simulate_replay(
+                        override,
+                        source_filter=source_filter,
+                        since=since,
+                        until=until,
+                        session_id=session_id,
+                        active_only=bool(getattr(args, "active_only", False)),
+                        min_seconds_to_expiry=min_seconds_to_expiry,
+                        max_seconds_to_expiry=max_seconds_to_expiry,
+                        now=datetime.now(timezone.utc),
+                        data_store=data_store,
+                        result_store=scratch,
+                        mode="replay",
+                        since_label=getattr(args, "since", None),
+                    )
+                    if not outcome["ok"]:
+                        lines.append(f"{close_mode}: {outcome['message']}")
+                        continue
+                    report = build_report(scratch, override.starting_balance, run_id=outcome["run_id"])
+                    lines.append(
+                        " | ".join(
+                            [
+                                f"close_mode={close_mode}",
+                                f"accepted_trades={outcome['accepted']}",
+                                f"closed_trades={report.closed_trades}",
+                                f"open_positions={report.open_positions}",
+                                f"realized_pnl=${report.realized_pnl:.2f}",
+                                f"unrealized_pnl=${report.unrealized_pnl:.2f}",
+                                f"win_rate={report.win_rate:.2%}",
+                                f"max_drawdown=${report.max_equity_drawdown:.2f}",
+                                f"max_exposure=${report.max_position_exposure:.2f}",
+                                f"expectancy={_fmt_money(report.expectancy_per_trade)}",
+                                f"top_1_pnl={_fmt_money(report.top_1_trade_pnl)}",
+                                f"top_3_pnl={_fmt_money(report.top_3_trades_pnl)}",
+                                f"top_1_pct={'n/a' if report.top_1_trade_pct_of_total_pnl is None else f'{report.top_1_trade_pct_of_total_pnl:.2%}'}",
+                                f"top_3_pct={'n/a' if report.top_3_trades_pct_of_total_pnl is None else f'{report.top_3_trades_pct_of_total_pnl:.2%}'}",
+                                f"settlement_unavailable={report.settlement_unavailable}",
+                                f"verdicts={', '.join(report.verdicts)}",
+                            ]
+                        )
+                    )
+                finally:
+                    scratch.close()
+        print("\n".join(lines))
+    finally:
+        data_store.close()
+    return 0
+
+
+def settlement_report(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        run_id = getattr(args, "run_id", None)
+        if not run_id:
+            run_id = store.latest_run_id() if bool(getattr(args, "latest", False)) or not getattr(args, "run_id", None) else None
+        if not run_id:
+            print("No run selected.")
+            return 1
+        print(build_settlement_report(store, run_id))
     finally:
         store.close()
     return 0

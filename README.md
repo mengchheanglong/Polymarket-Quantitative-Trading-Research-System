@@ -47,6 +47,7 @@ python -m src.main export --format csv --out exports --source public
 - Max equity drawdown, max position exposure, win rate, average edge, skipped-trade count
 - Average PnL per trade, average win, average loss, profit factor, expectancy per trade
 - Risk-blocked trades, max exposure as a bankroll percentage, and session loss-limit status
+- Profit concentration, tail-risk warnings, low-price entry contribution, and run-validity verdicts
 
 ## Paper Strategies
 
@@ -181,6 +182,25 @@ The tiny profile applies a paper-only risk template:
 Tiny mode does not create execution. It only changes paper sizing and replay admission rules. If a trade is blocked by exposure, open-position count, market count, session loss, daily loss, or cooldown, diagnostics record that explicitly.
 
 Win rate alone is not enough. Expectancy per trade, average win versus average loss, profit factor, and realized PnL all matter. A strategy can show a decent win rate and still be weak once costs and losses are measured honestly.
+
+Phase 13 adds tail-risk and settlement sanity checks for tiny-mode results:
+
+```powershell
+python -m src.main report --latest
+python -m src.main backtest-report --source public --session-id <session_id> --active-only --tiny
+python -m src.main close-mode-compare --strategy momentum --source public --session-id <session_id> --active-only --tiny
+python -m src.main settlement-report --run-id <run_id>
+```
+
+New report fields include top-1, top-3, top-5, and top-10%-trade PnL concentration, PnL excluding those top trades, median trade PnL, largest win/loss, win-loss payout ratio, and the contribution from very low entry prices such as `< 0.05` and `< 0.03`.
+
+These warnings matter:
+
+- `TAIL_RISK_CONCENTRATED_PROFIT`: a few trades explain most of the profit, or average edge stays negative while total PnL is positive.
+- `LOW_PRICE_BINARY_TAIL_STRATEGY`: most modeled profit comes from very low-priced binary entries with capped losses and rare large payouts.
+- `SETTLEMENT_APPROXIMATION_UNCERTAIN`: approximate-expiry closing used nearby exchange prices, not a true market settlement feed.
+
+Positive tiny-mode PnL is not enough by itself. If profit disappears after removing the top few trades, or if average edge is negative while profits are positive, treat the run as research-only and not evidence of a stable edge.
 
 ## Observe And Dataset Building
 

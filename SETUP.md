@@ -161,6 +161,8 @@ python -m src.main compare --source demo
 python -m src.main compare --source public --session-id <session_id>
 python -m src.main compare --source public --session-id <session_id> --active-only
 python -m src.main compare --source public --session-id <session_id> --active-only --tiny
+python -m src.main close-mode-compare --strategy momentum --source public --session-id <session_id> --active-only --tiny
+python -m src.main settlement-report --run-id <run_id>
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -174,6 +176,7 @@ python -m src.main diagnostics --strategy pair-cost --source public
 
 Replay diagnostics now include timing buckets and seconds-to-expiry summaries. Reports and ledgers also distinguish open, closed, unresolved, and settlement-unavailable paper positions.
 Phase 12 diagnostics also separate strategy skips from risk-blocked skips and report exposure over time, average trade size, largest single trade, max simultaneous positions, cooldown skips, and loss-limit skips.
+Phase 13 adds profit-concentration metrics, low-price-entry contribution, settlement sanity checks, and close-mode comparison on the same stored session.
 
 Run a research-only threshold sweep on stored snapshots:
 
@@ -244,3 +247,4 @@ Public discovery process:
 - `mark-to-market` and `approximate-expiry` close modes are paper-only research tools. They do not use authenticated APIs and do not imply real settlement certainty.
 - `--active-only` limits replay and sweeps to valid active market windows with stored orderbooks, so not-started or expired markets are separated from true strategy failures.
 - `--tiny` applies the paper-only small-bankroll profile. It is the safer default for evaluating whether a strategy survives tiny position sizing and strict exposure discipline.
+- Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are research warnings, not success badges. Positive PnL can still be dominated by a few low-priced binary payouts.
