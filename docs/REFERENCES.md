@@ -20,6 +20,7 @@ These are design references only. They do not authorize live trading, wallet sup
 ## Freqtrade
 
 - Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, active-window market filtering, tiny-position paper risk limits, and skeptical analysis of whether reported gains are concentrated in a few outsized trades.
+- Also useful for: defining stricter paper-readiness criteria for a promoted research preset without treating paper results as evidence of live tradability.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -54,6 +55,7 @@ Useful ideas:
 - simulation/live separation pattern
 - NautilusTrader-style architecture ideas
 - strategy-audit workflow ideas such as checking whether mark-to-market behavior survives a stricter expiry-based settlement approximation
+- conservative preset promotion ideas: narrower market filters, smaller paper exposure caps, and per-session validation before treating one strategy branch as the main research candidate
 
 Do not copy yet:
 - live execution
@@ -65,6 +67,7 @@ Do not copy yet:
 Relevant future phases:
 - Phase 14+: strategy signal design
 - Phase 15+: monitoring/reporting and strategy-audit workflow
+- Phase 16+: conservative preset validation, multi-session side-correctness review, and paper-readiness criteria
 - Phase 17+: live-executor design review, separate from paper engine
 
 Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

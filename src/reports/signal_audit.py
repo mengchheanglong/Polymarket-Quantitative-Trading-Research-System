@@ -25,8 +25,110 @@ class SignalAuditRow:
     pnl: float | None
 
 
-def build_signal_audit(store: SQLiteStore, run_id: str) -> str:
+def load_signal_audit_rows(store: SQLiteStore, run_id: str) -> tuple[object | None, list[SignalAuditRow]]:
     run = store.run_by_id(run_id)
+    if run is None:
+        return None, []
+    trade_rows = store.trade_rows(run_id)
+    if not trade_rows:
+        return run, []
+    opportunity_map = _accepted_opportunity_map(store, run_id)
+    return run, _signal_rows_for_records(store, run, trade_rows, opportunity_map)
+
+
+def load_signal_audit_rows_from_records(
+    price_store: SQLiteStore,
+    run,
+    trade_rows,
+    opportunity_map: dict[tuple[str, str, str], float] | None = None,
+) -> list[SignalAuditRow]:
+    return _signal_rows_for_records(price_store, run, trade_rows, opportunity_map or {})
+
+
+def _signal_rows_for_records(
+    price_store: SQLiteStore,
+    run,
+    trade_rows,
+    opportunity_map: dict[tuple[str, str, str], float],
+) -> list[SignalAuditRow]:
+    source_filter = str(run["data_source"]) if run["data_source"] in {"demo", "public"} else None
+    session_id = str(run["session_id"]) if run["session_id"] else None
+    rows: list[SignalAuditRow] = []
+    for trade in trade_rows:
+        opened_at = _parse_iso(str(trade["opened_at"]))
+        window_start = _parse_iso(str(trade["window_start"])) if trade["window_start"] else opened_at
+        window_end = _parse_iso(str(trade["window_end"]))
+        start_price = price_store.nearest_price(
+            str(trade["asset"]),
+            window_start,
+            max_delta_seconds=60,
+            source_filter=source_filter,
+            session_id=session_id,
+        )
+        expiry_price = price_store.nearest_price(
+            str(trade["asset"]),
+            window_end,
+            max_delta_seconds=60,
+            source_filter=source_filter,
+            session_id=session_id,
+        )
+        actual_result = _actual_result(start_price.price if start_price else None, expiry_price.price if expiry_price else None)
+        side = str(trade["direction"])
+        side_matched = None if actual_result == "UNKNOWN" else side == actual_result
+        edge = opportunity_map.get((str(trade["market_slug"]), side, str(trade["opened_at"])))
+        rows.append(
+            SignalAuditRow(
+                market_slug=str(trade["market_slug"]),
+                asset=str(trade["asset"]),
+                duration=_duration_label(trade["window_start"], trade["window_end"]),
+                side=side,
+                entry_timestamp=opened_at,
+                expiry_timestamp=window_end,
+                start_price=start_price.price if start_price else None,
+                expiry_price=expiry_price.price if expiry_price else None,
+                actual_result=actual_result,
+                side_matched=side_matched,
+                entry_price=float(trade["entry_price"]),
+                edge_at_entry=edge,
+                seconds_to_expiry=max(0.0, (window_end - opened_at).total_seconds()),
+                pnl=float(trade["pnl"]) if trade["pnl"] is not None else None,
+            )
+        )
+    return rows
+
+
+def summarize_signal_audit_rows(rows: list[SignalAuditRow]) -> dict[str, object]:
+    side_counts = Counter()
+    duration_counts = Counter()
+    outcome_counts = Counter()
+    by_asset = _correctness_breakdown(rows, key=lambda row: row.asset)
+    by_duration = _correctness_breakdown(rows, key=lambda row: row.duration)
+    by_side = _correctness_breakdown(rows, key=lambda row: row.side)
+    for row in rows:
+        side_counts[row.side] += 1
+        duration_counts[row.duration] += 1
+        if row.side_matched is True:
+            outcome_counts["matched"] += 1
+        elif row.side_matched is False:
+            outcome_counts["mismatched"] += 1
+        else:
+            outcome_counts["unknown"] += 1
+    resolved = outcome_counts["matched"] + outcome_counts["mismatched"]
+    return {
+        "matched": outcome_counts["matched"],
+        "mismatched": outcome_counts["mismatched"],
+        "unknown": outcome_counts["unknown"],
+        "correctness_rate": (outcome_counts["matched"] / resolved) if resolved else None,
+        "side_counts": dict(side_counts),
+        "duration_counts": dict(duration_counts),
+        "by_asset": by_asset,
+        "by_duration": by_duration,
+        "by_side": by_side,
+    }
+
+
+def build_signal_audit(store: SQLiteStore, run_id: str) -> str:
+    run, rows = load_signal_audit_rows(store, run_id)
     lines = ["Signal audit", f"Run ID: {run_id}"]
     if run is None:
         lines.append("Run not found.")
@@ -41,72 +143,17 @@ def build_signal_audit(store: SQLiteStore, run_id: str) -> str:
             f"Close mode: {close_mode or 'n/a'}",
         ]
     )
-    trade_rows = store.trade_rows(run_id)
-    if not trade_rows:
+    if not rows:
         lines.append("No accepted trades found.")
         return "\n".join(lines)
 
-    source_filter = str(run["data_source"]) if run["data_source"] in {"demo", "public"} else None
-    session_id = str(run["session_id"]) if run["session_id"] else None
-    opportunity_map = _accepted_opportunity_map(store, run_id)
-    rows: list[SignalAuditRow] = []
-    side_counts = Counter()
-    outcome_counts = Counter()
-    duration_counts = Counter()
-    for trade in trade_rows:
-        opened_at = _parse_iso(str(trade["opened_at"]))
-        window_start = _parse_iso(str(trade["window_start"])) if trade["window_start"] else opened_at
-        window_end = _parse_iso(str(trade["window_end"]))
-        start_price = store.nearest_price(
-            str(trade["asset"]),
-            window_start,
-            max_delta_seconds=60,
-            source_filter=source_filter,
-            session_id=session_id,
-        )
-        expiry_price = store.nearest_price(
-            str(trade["asset"]),
-            window_end,
-            max_delta_seconds=60,
-            source_filter=source_filter,
-            session_id=session_id,
-        )
-        actual_result = _actual_result(start_price.price if start_price else None, expiry_price.price if expiry_price else None)
-        side = str(trade["direction"])
-        side_matched = None if actual_result == "UNKNOWN" else side == actual_result
-        edge = opportunity_map.get((str(trade["market_slug"]), side, str(trade["opened_at"])))
-        row = SignalAuditRow(
-            market_slug=str(trade["market_slug"]),
-            asset=str(trade["asset"]),
-            duration=_duration_label(trade["window_start"], trade["window_end"]),
-            side=side,
-            entry_timestamp=opened_at,
-            expiry_timestamp=window_end,
-            start_price=start_price.price if start_price else None,
-            expiry_price=expiry_price.price if expiry_price else None,
-            actual_result=actual_result,
-            side_matched=side_matched,
-            entry_price=float(trade["entry_price"]),
-            edge_at_entry=edge,
-            seconds_to_expiry=max(0.0, (window_end - opened_at).total_seconds()),
-            pnl=float(trade["pnl"]) if trade["pnl"] is not None else None,
-        )
-        rows.append(row)
-        side_counts[side] += 1
-        duration_counts[row.duration] += 1
-        if side_matched is True:
-            outcome_counts["matched"] += 1
-        elif side_matched is False:
-            outcome_counts["mismatched"] += 1
-        else:
-            outcome_counts["unknown"] += 1
-
+    summary = summarize_signal_audit_rows(rows)
     lines.extend(
         [
             f"Accepted trades: {len(rows)}",
-            f"Side correctness: matched={outcome_counts['matched']}, mismatched={outcome_counts['mismatched']}, unknown={outcome_counts['unknown']}",
-            f"Accepted trades by side: {_fmt_map(dict(side_counts))}",
-            f"Accepted trades by duration: {_fmt_map(dict(duration_counts))}",
+            f"Side correctness: matched={summary['matched']}, mismatched={summary['mismatched']}, unknown={summary['unknown']}",
+            f"Accepted trades by side: {_fmt_map(summary['side_counts'])}",
+            f"Accepted trades by duration: {_fmt_map(summary['duration_counts'])}",
         ]
     )
     for row in rows:
@@ -156,6 +203,31 @@ def _actual_result(start_price: float | None, expiry_price: float | None) -> str
     if expiry_price < start_price:
         return "DOWN"
     return "FLAT"
+
+
+def _correctness_breakdown(
+    rows: list[SignalAuditRow],
+    *,
+    key,
+) -> dict[str, dict[str, float | int | None]]:
+    grouped: dict[str, dict[str, int]] = {}
+    for row in rows:
+        name = key(row)
+        stats = grouped.setdefault(name, {"matched": 0, "mismatched": 0, "unknown": 0})
+        if row.side_matched is True:
+            stats["matched"] += 1
+        elif row.side_matched is False:
+            stats["mismatched"] += 1
+        else:
+            stats["unknown"] += 1
+    output: dict[str, dict[str, float | int | None]] = {}
+    for name, stats in grouped.items():
+        resolved = stats["matched"] + stats["mismatched"]
+        output[name] = {
+            **stats,
+            "correctness_rate": (stats["matched"] / resolved) if resolved else None,
+        }
+    return output
 
 
 def _duration_label(window_start, window_end) -> str:

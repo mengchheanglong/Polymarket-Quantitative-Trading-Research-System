@@ -17,13 +17,24 @@ from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook,
 from src.reports.backtest import build_backtest_report
 from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
+from src.reports.conservative_report import (
+    ConservativeSessionRow,
+    aggregate_variant_row,
+    build_conservative_report,
+    conservative_readiness_verdict,
+)
 from src.reports.close_divergence import build_close_divergence_report
 from src.reports.dataset import build_dataset_summary
 from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
 from src.reports.momentum_audit import build_momentum_audit_report
 from src.reports.settlement import build_settlement_report
-from src.reports.signal_audit import build_signal_audit
+from src.reports.signal_audit import (
+    build_signal_audit,
+    load_signal_audit_rows,
+    load_signal_audit_rows_from_records,
+    summarize_signal_audit_rows,
+)
 from src.reports.summary import build_report
 from src.reports.sweep import SweepRow, build_sweep_report
 from src.safety import SafetyError, enforce_paper_only
@@ -67,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Paper strategy to simulate.",
     )
+    run_parser.add_argument(
+        "--preset",
+        choices=("balanced-tiny", "conservative-tiny"),
+        default=None,
+        help="Apply a paper-only preset.",
+    )
     run_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     report_parser = subcommands.add_parser("report", help="Summarize fake trading results")
     report_parser.add_argument("--latest", action="store_true", help="Report only the latest run.")
@@ -91,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--min-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
+    replay_parser.add_argument(
+        "--preset",
+        choices=("balanced-tiny", "conservative-tiny"),
+        default=None,
+        help="Apply a paper-only preset.",
+    )
     replay_parser.add_argument(
         "--momentum-preset",
         choices=("balanced-tiny-momentum", "conservative-tiny-momentum"),
@@ -226,6 +249,8 @@ def main(argv: list[str] | None = None) -> int:
     momentum_audit_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
     momentum_audit_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     momentum_audit_parser.add_argument("--tiny", action="store_true")
+    conservative_report_parser = subcommands.add_parser("conservative-report", help="Validate the conservative tiny momentum preset across stored sessions")
+    conservative_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -239,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _replace_close_mode(config, args.close_mode)
     if getattr(args, "tiny", False) and args.command in {"replay", "run-paper", "close-mode-compare", "close-divergence", "momentum-audit"}:
         config = _replace_tiny_profile(config)
+    if getattr(args, "preset", None):
+        config = _apply_named_preset(config, args.preset)
     if getattr(args, "momentum_preset", None):
         config = _apply_momentum_preset(config, args.momentum_preset)
 
@@ -298,6 +325,8 @@ def main(argv: list[str] | None = None) -> int:
             return close_divergence(config, args)
         if args.command == "momentum-audit":
             return momentum_audit(config, args)
+        if args.command == "conservative-report":
+            return conservative_report(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -1229,6 +1258,101 @@ def momentum_audit(config: AgentConfig, args) -> int:
                 baseline_rows=baseline_rows,
                 timing_rows=timing_rows,
                 experiment_rows=experiment_rows,
+            )
+        )
+    finally:
+        data_store.close()
+    return 0
+
+
+def conservative_report(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    data_store = SQLiteStore(config.database_path)
+    try:
+        sessions = [
+            row
+            for row in data_store.research_session_rows()
+            if data_store.dataset_summary(source_filter=source_filter, session_id=str(row["session_id"]))["total_snapshots"] > 0
+        ]
+        baseline_config = _replace_close_mode(
+            _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+            "approximate-expiry",
+        )
+        session_payloads: list[dict] = []
+        variant_payloads: dict[str, list[dict]] = {
+            "BTC-only conservative": [],
+            "ETH-only conservative": [],
+            "BTC+ETH conservative": [],
+            "5m-only conservative": [],
+            "15m-only conservative": [],
+        }
+        for session in sessions:
+            session_id = str(session["session_id"])
+            baseline = _conservative_variant_summary(
+                baseline_config,
+                data_store=data_store,
+                source_filter=source_filter,
+                session_id=session_id,
+                label="conservative-tiny",
+            )
+            if baseline["ok"]:
+                session_payloads.append(baseline)
+            variant_specs = [
+                ("BTC-only conservative", {}),
+                ("ETH-only conservative", {"momentum_asset_filter": "ETH"}),
+                ("BTC+ETH conservative", {"momentum_asset_filter": None}),
+                ("5m-only conservative", {"momentum_duration_filter": "5m"}),
+                ("15m-only conservative", {"momentum_duration_filter": "15m"}),
+            ]
+            for label, overrides in variant_specs:
+                variant = _conservative_variant_summary(
+                    _replace_config_values(baseline_config, **overrides),
+                    data_store=data_store,
+                    source_filter=source_filter,
+                    session_id=session_id,
+                    label=label,
+                )
+                if variant["ok"]:
+                    variant_payloads[label].append(variant)
+        session_rows = [
+            ConservativeSessionRow(
+                session_id=payload["session_id"],
+                accepted_trades=payload["accepted"],
+                closed_trades=payload["report"].closed_trades,
+                realized_pnl=payload["report"].realized_pnl,
+                win_rate=payload["report"].win_rate,
+                expectancy=payload["report"].expectancy_per_trade,
+                max_drawdown=payload["report"].max_equity_drawdown,
+                max_exposure=payload["report"].max_position_exposure,
+                top_1_trade_pct=payload["report"].top_1_trade_pct_of_total_pnl,
+                pnl_excluding_top_1=payload["report"].pnl_excluding_top_1,
+                pnl_excluding_top_3=payload["report"].pnl_excluding_top_3,
+                settlement_unavailable=payload["report"].settlement_unavailable,
+                matched=payload["summary"]["matched"],
+                mismatched=payload["summary"]["mismatched"],
+                unknown=payload["summary"]["unknown"],
+                side_correctness_rate=payload["summary"]["correctness_rate"],
+                warnings=payload["report"].warnings,
+                verdicts=payload["paper_verdicts"],
+            )
+            for payload in session_payloads
+        ]
+        aggregate = aggregate_variant_row(label="conservative-tiny", session_rows=session_payloads)
+        variant_rows = [
+            aggregate_variant_row(label=label, session_rows=rows)
+            for label, rows in variant_payloads.items()
+            if rows
+        ]
+        print(
+            build_conservative_report(
+                source_filter=source_filter,
+                preset_summary=_conservative_preset_summary(baseline_config),
+                session_rows=session_rows,
+                aggregate_row=aggregate,
+                variant_rows=variant_rows,
+                by_asset=_aggregate_correctness_breakdowns(session_payloads, "by_asset"),
+                by_duration=_aggregate_correctness_breakdowns(session_payloads, "by_duration"),
+                by_side=_aggregate_correctness_breakdowns(session_payloads, "by_side"),
             )
         )
     finally:
@@ -2232,6 +2356,7 @@ def _scratch_replay_summary(
             )
             if not outcome["ok"]:
                 return {
+                    "ok": False,
                     "label": label,
                     "close_mode": config.close_mode,
                     "accepted": 0,
@@ -2245,10 +2370,33 @@ def _scratch_replay_summary(
                     "warnings": ("FAILED_REPLAY",),
                     "verdicts": (outcome["message"],),
                     "trade_rows": [],
+                    "signal_rows": [],
+                    "summary": {"matched": 0, "mismatched": 0, "unknown": 0, "correctness_rate": None, "by_asset": {}, "by_duration": {}, "by_side": {}},
+                    "report": None,
                 }
             report = build_report(scratch, config.starting_balance, run_id=outcome["run_id"])
+            run_row = scratch.run_by_id(outcome["run_id"])
+            opportunity_map = {
+                (str(row["market_slug"]), str(row["direction"]), str(row["observed_at"])): float(row["edge"] or 0.0)
+                for row in scratch.rows(
+                    """
+                    SELECT market_slug, direction, observed_at, edge
+                    FROM opportunities
+                    WHERE run_id = ? AND decision = 'TRADE'
+                    """,
+                    (outcome["run_id"],),
+                )
+            }
+            signal_rows = load_signal_audit_rows_from_records(
+                data_store,
+                run_row,
+                scratch.trade_rows(run_id=outcome["run_id"]),
+                opportunity_map,
+            ) if run_row is not None else []
             return {
+                "ok": True,
                 "label": label,
+                "run_id": outcome["run_id"],
                 "close_mode": config.close_mode,
                 "accepted": outcome["accepted"],
                 "closed": report.closed_trades,
@@ -2261,6 +2409,9 @@ def _scratch_replay_summary(
                 "warnings": report.warnings,
                 "verdicts": report.verdicts,
                 "trade_rows": scratch.trade_rows(run_id=outcome["run_id"]),
+                "signal_rows": signal_rows,
+                "summary": summarize_signal_audit_rows(signal_rows),
+                "report": report,
             }
         finally:
             scratch.close()
@@ -2290,6 +2441,63 @@ def _timing_bucket_rows(trade_rows, close_mode: str) -> list[dict[str, object]]:
                 ),
             }
         )
+    return output
+
+
+def _conservative_variant_summary(
+    config: AgentConfig,
+    *,
+    data_store: SQLiteStore,
+    source_filter: str | None,
+    session_id: str,
+    label: str,
+) -> dict:
+    summary = _scratch_replay_summary(
+        config,
+        data_store=data_store,
+        source_filter=source_filter,
+        since=None,
+        until=None,
+        session_id=session_id,
+        active_only=True,
+        min_seconds_to_expiry=config.min_seconds_to_expiry,
+        max_seconds_to_expiry=config.max_seconds_to_expiry,
+        mode="replay",
+        label=label,
+    )
+    if not summary["ok"] or summary["report"] is None:
+        return summary
+    report = summary["report"]
+    summary["session_id"] = session_id
+    summary["paper_verdicts"] = conservative_readiness_verdict(
+        closed_trades=report.closed_trades,
+        realized_pnl=report.realized_pnl,
+        expectancy=report.expectancy_per_trade,
+        pnl_excluding_top_3=report.pnl_excluding_top_3,
+        top_1_trade_pct=report.top_1_trade_pct_of_total_pnl,
+        side_correctness_rate=summary["summary"]["correctness_rate"],
+        max_drawdown=report.max_equity_drawdown,
+        drawdown_limit=config.session_loss_limit_usd,
+    )
+    summary["drawdown_limit"] = config.session_loss_limit_usd
+    return summary
+
+
+def _aggregate_correctness_breakdowns(session_payloads: list[dict], key: str) -> dict[str, dict[str, float | int | None]]:
+    merged: dict[str, dict[str, int]] = {}
+    for payload in session_payloads:
+        for name, stats in payload["summary"].get(key, {}).items():
+            target = merged.setdefault(name, {"matched": 0, "mismatched": 0, "unknown": 0})
+            target["matched"] += int(stats["matched"])
+            target["mismatched"] += int(stats["mismatched"])
+            target["unknown"] += int(stats["unknown"])
+    output: dict[str, dict[str, float | int | None]] = {}
+    for name, stats in merged.items():
+        resolved = stats["matched"] + stats["mismatched"]
+        output[name] = {
+            **stats,
+            "correctness_rate": (stats["matched"] / resolved) if resolved else None,
+        }
     return output
 
 
@@ -2688,30 +2896,58 @@ def _replace_tiny_profile(config: AgentConfig) -> AgentConfig:
     )
 
 
+def _apply_named_preset(config: AgentConfig, preset: str) -> AgentConfig:
+    mapping = {
+        "balanced-tiny": "balanced-tiny-momentum",
+        "conservative-tiny": "conservative-tiny-momentum",
+    }
+    if preset in mapping:
+        return _apply_momentum_preset(config, mapping[preset])
+    return _apply_momentum_preset(config, preset)
+
+
 def _apply_momentum_preset(config: AgentConfig, preset: str) -> AgentConfig:
     base = _replace_tiny_profile(config)
-    if preset == "balanced-tiny-momentum":
+    if preset in {"balanced-tiny", "balanced-tiny-momentum"}:
         return _replace_config_values(
             base,
-            momentum_preset=preset,
+            momentum_preset="balanced-tiny",
             min_seconds_to_expiry=60,
             max_seconds_to_expiry=180,
             max_spread=min(base.max_spread, 0.05),
         )
-    if preset == "conservative-tiny-momentum":
+    if preset in {"conservative-tiny", "conservative-tiny-momentum"}:
         return _replace_config_values(
             base,
-            momentum_preset=preset,
+            momentum_preset="conservative-tiny",
             momentum_asset_filter="BTC",
             momentum_duration_filter="5m",
             momentum_min_entry_price=0.05,
             momentum_max_entry_price=0.85,
             min_edge=max(base.min_edge, 0.03),
             max_spread=min(base.max_spread, 0.02),
+            max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),
             min_seconds_to_expiry=60,
             max_seconds_to_expiry=180,
         )
     raise ValueError(f"unsupported momentum preset: {preset}")
+
+
+def _conservative_preset_summary(config: AgentConfig) -> str:
+    return (
+        f"momentum_preset={config.momentum_preset or 'none'} | "
+        f"tiny_profile={'true' if config.tiny_profile else 'false'} | "
+        f"momentum_asset_filter={config.momentum_asset_filter or 'none'} | "
+        f"momentum_duration_filter={config.momentum_duration_filter or 'none'} | "
+        f"min_edge={config.min_edge:.2f} | "
+        f"max_spread={config.max_spread:.2f} | "
+        f"momentum_min_entry_price={config.momentum_min_entry_price if config.momentum_min_entry_price is not None else 'none'} | "
+        f"momentum_max_entry_price={config.momentum_max_entry_price if config.momentum_max_entry_price is not None else 'none'} | "
+        f"max_trade_usd={config.max_trade_usd:.2f} | "
+        f"max_total_exposure_usd={config.max_total_exposure_usd:.2f} | "
+        f"min_seconds_to_expiry={config.min_seconds_to_expiry if config.min_seconds_to_expiry is not None else 'none'} | "
+        f"max_seconds_to_expiry={config.max_seconds_to_expiry if config.max_seconds_to_expiry is not None else 'none'}"
+    )
 
 
 def _effective_expiry_filters(config: AgentConfig, args) -> tuple[int | None, int | None]:

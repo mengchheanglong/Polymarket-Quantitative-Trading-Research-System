@@ -251,6 +251,48 @@ New warnings include:
 
 Tiny momentum is still under audit. If approximate-expiry is weak while mark-to-market looks good, treat that as disagreement, not as proof of an edge.
 
+Phase 16 promotes `conservative-tiny` as the current primary paper research candidate for momentum, while keeping the repo paper-only:
+
+```powershell
+python -m src.main replay --strategy momentum --preset conservative-tiny --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main signal-audit --run-id <run_id>
+python -m src.main conservative-report --source public
+```
+
+The conservative preset is intentionally stricter than baseline tiny momentum:
+
+- tiny-position sizing
+- BTC-only
+- 5-minute markets only
+- higher minimum edge
+- tighter spread cap
+- no entries below `0.05`
+- no entries above `0.85`
+- `MAX_TOTAL_EXPOSURE_USD` capped at `5.00`
+- conservative expiry window
+
+Baseline tiny momentum is not trusted as a main candidate. Conservative tiny momentum is the cleaner paper-research branch because it reduces tail-heavy low-price entries and narrows the market selection. That still does not make it proven.
+
+`conservative-report` runs the conservative preset across all stored public sessions using stored snapshots only. It summarizes:
+
+- accepted trades
+- closed trades
+- realized PnL
+- win rate
+- expectancy
+- max drawdown
+- max exposure
+- top-trade concentration
+- PnL excluding top 1 and top 3 trades
+- settlement-unavailable count
+- side correctness
+- BTC-only vs ETH-only
+- BTC+ETH
+- 5m-only vs 15m-only
+- per-session and aggregate paper-readiness verdicts
+
+Paper-readiness is deliberately strict. `PAPER_PROMISING` requires at least 50 closed trades, positive realized PnL, positive expectancy, positive PnL after removing the top 3 trades, limited top-trade concentration, side correctness above 55%, acceptable drawdown, and no safety violations. Most runs should still land in `NEEDS_MORE_DATA`, `TAIL_RISK_DOMINATED`, `NEGATIVE_EXPECTANCY`, `DIRECTIONAL_SIGNAL_FAILED`, or `INSUFFICIENT_CLOSED_TRADES`.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

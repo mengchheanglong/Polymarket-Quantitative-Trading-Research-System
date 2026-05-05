@@ -139,6 +139,7 @@ python -m src.main replay --strategy momentum --source public --session-id <sess
 python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --close-mode approximate-expiry --tiny
 python -m src.main replay --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry
 python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry --momentum-preset conservative-tiny-momentum
+python -m src.main replay --strategy momentum --preset conservative-tiny --source public --session-id <session_id> --active-only --close-mode approximate-expiry
 ```
 
 Summarize replay/backtest and data quality:
@@ -170,6 +171,7 @@ python -m src.main markov-report --source public --session-id <session_id>
 python -m src.main signal-audit --run-id <run_id>
 python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --active-only --tiny
 python -m src.main momentum-audit --source public --session-id <session_id> --tiny
+python -m src.main conservative-report --source public
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -258,6 +260,8 @@ Public discovery process:
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are research warnings, not success badges. Positive PnL can still be dominated by a few low-priced binary payouts.
 - `markov-report` and `stuck-markov` use stored snapshots only. They do not call live endpoints during replay and they do not create an execution path.
 - `signal-audit` checks whether the chosen momentum side matched the approximate-expiry direction implied by stored exchange prices near market start and expiry.
+- `conservative-tiny` is the current main momentum research preset. It keeps the paper engine in tiny mode, prefers BTC 5-minute markets, tightens the edge/spread window, blocks very low and very high entries, and caps total paper exposure at `$5.00`.
+- `conservative-report` replays that preset across all stored public sessions using stored snapshots only, then reports side correctness, top-trade concentration, PnL excluding top trades, BTC-vs-ETH comparisons, 5m-vs-15m comparisons, and paper-readiness verdicts.
 - `close-divergence` compares trade-level outcomes between `mark-to-market` and `approximate-expiry` on the same stored session.
 - `momentum-audit` runs paper-only filter experiments such as `UP` only, `DOWN` only, `BTC` only, `ETH` only, `5m` only, `15m` only, tighter expiry windows, and the `balanced-tiny-momentum` / `conservative-tiny-momentum` research presets.
 - Tiny momentum remains under audit. Positive mark-to-market output is not enough if approximate-expiry is weak or directionally wrong.
