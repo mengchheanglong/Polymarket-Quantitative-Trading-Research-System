@@ -29,6 +29,13 @@ from src.simulator.lifecycle import classify_market_lifecycle
 from src.storage.export import export_csv
 from src.storage.sqlite import SQLiteStore
 from src.strategies.pair_cost_arbitrage import PairCostArbitrageStrategy
+from src.strategies.stuck_state_markov import (
+    build_markov_model,
+    build_markov_report,
+    evaluate_stuck_markov_market,
+    latest_observation_time,
+    latest_tradeable_observation_time,
+)
 from src.strategies.updown_momentum import MomentumUpDownStrategy
 
 
@@ -53,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--strategy",
-        choices=("momentum", "pair-cost"),
+        choices=("momentum", "pair-cost", "stuck-markov"),
         default=None,
         help="Paper strategy to simulate.",
     )
@@ -62,14 +69,14 @@ def main(argv: list[str] | None = None) -> int:
     report_parser.add_argument("--latest", action="store_true", help="Report only the latest run.")
     report_parser.add_argument("--all", action="store_true", help="Report all runs combined.")
     report_parser.add_argument("--run-id", help="Report a specific run.")
-    report_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Report runs for a strategy.")
+    report_parser.add_argument("--strategy", choices=("momentum", "pair-cost", "stuck-markov"), help="Report runs for a strategy.")
     trades_parser = subcommands.add_parser("trades", help="Show simulated trades and skipped opportunities")
     trades_parser.add_argument("--run-id", help="Show ledger for a specific run.")
     trades_parser.add_argument("--all", action="store_true", help="Show ledger for all runs.")
     replay_parser = subcommands.add_parser("replay", help="Replay stored snapshots without external APIs")
     replay_parser.add_argument(
         "--strategy",
-        choices=("momentum", "pair-cost"),
+        choices=("momentum", "pair-cost", "stuck-markov"),
         default=None,
         help="Paper strategy to replay.",
     )
@@ -91,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser = subcommands.add_parser("backtest-report", help="Summarize stored snapshots and replay output")
     backtest_parser.add_argument(
         "--strategy",
-        choices=("momentum", "pair-cost"),
+        choices=("momentum", "pair-cost", "stuck-markov"),
         default=None,
         help="Strategy label to show in the report.",
     )
@@ -109,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("--tiny", action="store_true", help="Compare only runs created with the tiny-position profile.")
     diagnostics_parser = subcommands.add_parser("diagnostics", help="Explain accepted/skipped paper opportunities")
     diagnostics_parser.add_argument("--run-id", help="Inspect a specific run.")
-    diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), help="Filter by strategy.")
+    diagnostics_parser.add_argument("--strategy", choices=("momentum", "pair-cost", "stuck-markov"), help="Filter by strategy.")
     diagnostics_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     diagnostics_parser.add_argument("--session-id", help="Filter runs for a research session.")
     diagnostics_parser.add_argument("--active-only", action="store_true", help="Filter to runs created with --active-only and show active-market liquidity diagnostics.")
@@ -163,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     active_markets_parser.add_argument("--max-seconds-to-expiry", type=int, default=None)
     discover_parser = subcommands.add_parser("discover-markets", help="Probe public Polymarket market discovery")
     discover_parser.add_argument("--asset", choices=("BTC", "ETH", "all"), default="all")
+    markov_parser = subcommands.add_parser("markov-report", help="Summarize stuck-state transition probabilities from stored snapshots")
+    markov_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
+    markov_parser.add_argument("--since", help="Only inspect snapshots at or after this UTC ISO timestamp.")
+    markov_parser.add_argument("--until", help="Only inspect snapshots at or before this UTC ISO timestamp.")
+    markov_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     export_parser = subcommands.add_parser("export", help="Export local research data")
     export_parser.add_argument("--format", choices=("csv",), default="csv")
     export_parser.add_argument("--out", default="exports")
@@ -171,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--until", help="Only export raw snapshots at or before this UTC ISO timestamp.")
     export_parser.add_argument("--session-id", help="Export only data tied to a research session when possible.")
     close_mode_compare_parser = subcommands.add_parser("close-mode-compare", help="Compare replay close modes on stored snapshots")
-    close_mode_compare_parser.add_argument("--strategy", choices=("momentum", "pair-cost"), required=True)
+    close_mode_compare_parser.add_argument("--strategy", choices=("momentum", "pair-cost", "stuck-markov"), required=True)
     close_mode_compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
     close_mode_compare_parser.add_argument("--since", help="Only use stored snapshots at or after this UTC ISO timestamp.")
     close_mode_compare_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
@@ -239,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
             return active_markets(config, args)
         if args.command == "discover-markets":
             return discover_markets(config, args)
+        if args.command == "markov-report":
+            return markov_report(config, args)
         if args.command == "export":
             return export_data(config, args)
         if args.command == "close-mode-compare":
@@ -944,6 +958,25 @@ def export_data(config: AgentConfig, args) -> int:
     return 0
 
 
+def markov_report(config: AgentConfig, args) -> int:
+    store = SQLiteStore(config.database_path)
+    try:
+        session_id, since, until = _resolved_time_filters(store, args)
+        print(
+            build_markov_report(
+                store,
+                config,
+                source_filter=_clean_source_filter(getattr(args, "source", None)),
+                since=since,
+                until=until,
+                session_id=session_id,
+            )
+        )
+    finally:
+        store.close()
+    return 0
+
+
 def close_mode_compare(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None))
     data_store = SQLiteStore(config.database_path)
@@ -1447,6 +1480,102 @@ def _run_replay_pair_cost(
     return accepted, skipped
 
 
+def _run_replay_stuck_markov(
+    config: AgentConfig,
+    engine: PaperTradingEngine,
+    data_store: SQLiteStore,
+    markets,
+    *,
+    close_mode: str,
+    settlement_prices,
+    status_counts: dict[str, int],
+    source_filter: str | None,
+    session_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[int, int]:
+    model = build_markov_model(
+        data_store,
+        source_filter=source_filter,
+        since=since,
+        until=until,
+        session_id=session_id,
+        config=config,
+    )
+    accepted = 0
+    skipped = 0
+    for market in markets:
+        observed_at = latest_tradeable_observation_time(model, market, config) or market.observed_at or market.window.start
+        _merge_close_counts(
+            status_counts,
+            _close_replay_positions(
+                config,
+                engine,
+                data_store,
+                close_mode=close_mode,
+                replay_end=observed_at,
+                count_open=False,
+                source_filter=source_filter,
+                session_id=session_id,
+                settlement_prices=settlement_prices,
+            ),
+        )
+        price_snapshot = data_store.latest_price(
+            market.asset.value,
+            source_filter=source_filter,
+            until=observed_at,
+            session_id=session_id,
+        )
+        if price_snapshot is None:
+            engine.store.log_opportunity(
+                observed_at,
+                OpportunityDecision(
+                    market=market,
+                    signal=Signal(asset=market.asset, direction=Direction.UP, probability=0.5, edge=0.0, reason="missing underlying price"),
+                    market_price=None,
+                    spread=None,
+                    decision="SKIP",
+                    reason="missing underlying price",
+                ),
+                run_id=engine.run_id,
+            )
+            skipped += 1
+            continue
+        strategy_decision = evaluate_stuck_markov_market(
+            data_store,
+            model,
+            market,
+            observed_at=observed_at,
+            source_filter=source_filter,
+            session_id=session_id,
+            config=config,
+        ).decision
+        if strategy_decision.decision != "TRADE":
+            engine.store.log_opportunity(observed_at, strategy_decision, run_id=engine.run_id)
+            skipped += 1
+            continue
+        orderbook = data_store.collected_orderbook(
+            market.token_for(strategy_decision.signal.direction),
+            source_filter=source_filter,
+            until=observed_at,
+            session_id=session_id,
+        )
+        if orderbook is None:
+            engine.store.log_opportunity(
+                observed_at,
+                replace(strategy_decision, decision="SKIP", reason="missing orderbook"),
+                run_id=engine.run_id,
+            )
+            skipped += 1
+            continue
+        fill = engine.enter(strategy_decision, orderbook, price_snapshot, now=observed_at)
+        if fill:
+            accepted += 1
+        else:
+            skipped += 1
+    return accepted, skipped
+
+
 def _close_replay_positions(
     config: AgentConfig,
     engine: PaperTradingEngine,
@@ -1728,6 +1857,20 @@ def _simulate_replay(
                 status_counts=close_counts,
                 source_filter=source_filter,
                 session_id=session_id,
+            )
+        elif config.strategy == "stuck-markov":
+            accepted, skipped = _run_replay_stuck_markov(
+                config,
+                engine,
+                data_store,
+                markets,
+                close_mode=config.close_mode,
+                settlement_prices=settlement_prices,
+                status_counts=close_counts,
+                source_filter=source_filter,
+                session_id=session_id,
+                since=since,
+                until=until,
             )
         else:
             accepted, skipped = _run_replay_momentum(
@@ -2149,6 +2292,12 @@ def _config_notes(config: AgentConfig) -> str:
         f"failed_fill_probability={config.failed_fill_probability}; "
         f"pair_cost_threshold={config.pair_cost_threshold}; "
         f"pair_cost_failed_second_leg_probability={config.pair_cost_failed_second_leg_probability}; "
+        f"stuck_state_min_cycles={config.stuck_state_min_cycles}; "
+        f"stuck_price_bucket_min={config.stuck_price_bucket_min}; "
+        f"stuck_price_bucket_max={config.stuck_price_bucket_max}; "
+        f"stuck_max_spread={config.stuck_max_spread}; "
+        f"stuck_min_seconds_to_expiry={config.stuck_min_seconds_to_expiry}; "
+        f"stuck_max_seconds_to_expiry={config.stuck_max_seconds_to_expiry}; "
         f"close_mode={config.close_mode}; tiny_profile={'true' if config.tiny_profile else 'false'}"
     )
 

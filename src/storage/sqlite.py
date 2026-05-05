@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS opportunities (
     seconds_to_expiry REAL,
     lifecycle_status TEXT,
     timing_bucket TEXT,
+    state_bucket TEXT,
+    stuck_cycles INTEGER,
+    transition_probability REAL,
+    exchange_move REAL,
     is_mock INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS trades (
@@ -64,6 +68,10 @@ CREATE TABLE IF NOT EXISTS trades (
     status TEXT NOT NULL,
     close_mode TEXT,
     settlement_note TEXT,
+    state_bucket TEXT,
+    stuck_cycles INTEGER,
+    transition_probability REAL,
+    exchange_move REAL,
     is_mock INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bankroll (
@@ -279,6 +287,10 @@ class SQLiteStore:
             ("seconds_to_expiry", "ALTER TABLE opportunities ADD COLUMN seconds_to_expiry REAL"),
             ("lifecycle_status", "ALTER TABLE opportunities ADD COLUMN lifecycle_status TEXT"),
             ("timing_bucket", "ALTER TABLE opportunities ADD COLUMN timing_bucket TEXT"),
+            ("state_bucket", "ALTER TABLE opportunities ADD COLUMN state_bucket TEXT"),
+            ("stuck_cycles", "ALTER TABLE opportunities ADD COLUMN stuck_cycles INTEGER"),
+            ("transition_probability", "ALTER TABLE opportunities ADD COLUMN transition_probability REAL"),
+            ("exchange_move", "ALTER TABLE opportunities ADD COLUMN exchange_move REAL"),
         ):
             if column not in opportunities_cols:
                 self.conn.execute(ddl)
@@ -288,6 +300,10 @@ class SQLiteStore:
             ("window_start", "ALTER TABLE trades ADD COLUMN window_start TEXT"),
             ("close_mode", "ALTER TABLE trades ADD COLUMN close_mode TEXT"),
             ("settlement_note", "ALTER TABLE trades ADD COLUMN settlement_note TEXT"),
+            ("state_bucket", "ALTER TABLE trades ADD COLUMN state_bucket TEXT"),
+            ("stuck_cycles", "ALTER TABLE trades ADD COLUMN stuck_cycles INTEGER"),
+            ("transition_probability", "ALTER TABLE trades ADD COLUMN transition_probability REAL"),
+            ("exchange_move", "ALTER TABLE trades ADD COLUMN exchange_move REAL"),
         ):
             if column not in trades_cols:
                 self.conn.execute(ddl)
@@ -730,8 +746,9 @@ class SQLiteStore:
             """
             INSERT INTO opportunities
                 (run_id, observed_at, market_slug, asset, direction, probability, edge, market_price,
-                 spread, decision, reason, seconds_to_expiry, lifecycle_status, timing_bucket, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 spread, decision, reason, seconds_to_expiry, lifecycle_status, timing_bucket, state_bucket,
+                 stuck_cycles, transition_probability, exchange_move, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -748,6 +765,10 @@ class SQLiteStore:
                 decision.seconds_to_expiry,
                 decision.lifecycle_status,
                 decision.timing_bucket,
+                decision.state_bucket,
+                decision.stuck_cycles,
+                decision.transition_probability,
+                decision.exchange_move,
                 int(decision.market.is_mock),
             ),
         )
@@ -759,8 +780,9 @@ class SQLiteStore:
             INSERT INTO trades
                 (trade_id, run_id, opened_at, market_slug, title, asset, direction, token_id, window_start, window_end,
                  entry_price, shares, notional, entry_fee, slippage_cost, total_cost,
-                 entry_underlying_price, status, close_mode, settlement_note, is_mock)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, ?)
+                 entry_underlying_price, status, close_mode, settlement_note, state_bucket, stuck_cycles,
+                 transition_probability, exchange_move, is_mock)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', NULL, NULL, ?, ?, ?, ?, ?)
             """,
             (
                 fill.trade_id,
@@ -780,6 +802,10 @@ class SQLiteStore:
                 fill.slippage_cost,
                 fill.notional + fill.entry_fee + fill.slippage_cost,
                 fill.entry_underlying_price,
+                getattr(fill, "state_bucket", None),
+                getattr(fill, "stuck_cycles", None),
+                getattr(fill, "transition_probability", None),
+                getattr(fill, "exchange_move", None),
                 int(fill.market.is_mock),
             ),
         )

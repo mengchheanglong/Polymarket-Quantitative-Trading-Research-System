@@ -39,6 +39,12 @@ class AgentConfig:
     failed_fill_probability: float = 0.0
     pair_cost_threshold: float = 0.98
     pair_cost_failed_second_leg_probability: float = 0.0
+    stuck_state_min_cycles: int = 3
+    stuck_price_bucket_min: float = 0.70
+    stuck_price_bucket_max: float = 0.80
+    stuck_max_spread: float = 0.02
+    stuck_min_seconds_to_expiry: int = 30
+    stuck_max_seconds_to_expiry: int = 180
     min_seconds_before_end: int = 45
     max_seconds_after_start: int | None = None
     max_market_duration_minutes: int = 60
@@ -98,6 +104,12 @@ def load_config() -> AgentConfig:
         pair_cost_failed_second_leg_probability=float(
             os.environ.get("PAIR_COST_FAILED_SECOND_LEG_PROBABILITY", "0")
         ),
+        stuck_state_min_cycles=int(os.environ.get("STUCK_STATE_MIN_CYCLES", "3")),
+        stuck_price_bucket_min=float(os.environ.get("STUCK_PRICE_BUCKET_MIN", "0.70")),
+        stuck_price_bucket_max=float(os.environ.get("STUCK_PRICE_BUCKET_MAX", "0.80")),
+        stuck_max_spread=float(os.environ.get("STUCK_MAX_SPREAD", "0.02")),
+        stuck_min_seconds_to_expiry=int(os.environ.get("STUCK_MIN_SECONDS_TO_EXPIRY", "30")),
+        stuck_max_seconds_to_expiry=int(os.environ.get("STUCK_MAX_SECONDS_TO_EXPIRY", "180")),
         min_seconds_before_end=int(os.environ.get("MIN_SECONDS_BEFORE_END", "45")),
         max_seconds_after_start=int(max_after) if max_after else None,
         max_market_duration_minutes=int(os.environ.get("MAX_MARKET_DURATION_MINUTES", "60")),

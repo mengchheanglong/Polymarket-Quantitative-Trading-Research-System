@@ -202,6 +202,28 @@ These warnings matter:
 
 Positive tiny-mode PnL is not enough by itself. If profit disappears after removing the top few trades, or if average edge is negative while profits are positive, treat the run as research-only and not evidence of a stable edge.
 
+Phase 14 adds a paper-only stuck-state / Markov strategy for BTC 5-minute markets:
+
+```powershell
+python -m src.main markov-report --source public --session-id <session_id>
+python -m src.main replay --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry
+python -m src.main diagnostics --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny
+python -m src.main close-mode-compare --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny
+```
+
+The hypothesis is narrow:
+
+- BTC only
+- 5-minute markets only
+- active windows only
+- complete YES/NO orderbooks only
+- stuck price buckets around `0.70-0.80`
+- exchange price moves in the same direction while the Polymarket side price stays stuck for `3+` cycles
+
+`markov-report` summarizes bucket transitions from stored snapshots, including 5m and 15m transition counts, stuck-state counts, and the probability of a bucket moving toward `0.90-1.00` or `0.00-0.10` on the next observation. The strategy remains paper-only and uses stored public snapshots only.
+
+This is still not proof of live profitability. Tail-risk metrics, concentration checks, and settlement-approximation warnings still apply to `stuck-markov` exactly as they do to the earlier momentum and pair-cost strategies.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

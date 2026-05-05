@@ -159,6 +159,16 @@ def _aggregate_for_runs(
     strategy_skips = {reason: count for reason, count in skipped_by_reason.items() if reason not in RISK_BLOCK_REASONS}
     risk_skips = {reason: count for reason, count in skipped_by_reason.items() if reason in RISK_BLOCK_REASONS}
     trade_sizes = [float(row["total_cost"] or 0.0) for row in trade_rows]
+    stuck_rows = [row for row in opportunity_rows if str(row["strategy"]) == "stuck-markov"]
+    stuck_bucket_distribution = Counter(str(row["state_bucket"]) for row in stuck_rows if row["state_bucket"])
+    stuck_cycles_values = [int(row["stuck_cycles"]) for row in stuck_rows if row["stuck_cycles"] is not None]
+    transition_probabilities = [float(row["transition_probability"]) for row in stuck_rows if row["transition_probability"] is not None]
+    closed_stuck_trades = [
+        row for row in trade_rows if str(row["status"]).startswith("CLOSED") and row["state_bucket"] is not None
+    ]
+    result_by_bucket = Counter(str(row["state_bucket"]) for row in closed_stuck_trades)
+    result_by_seconds_bucket = Counter(_seconds_bucket(_seconds_to_expiry_for_trade(row)) for row in closed_stuck_trades)
+    result_by_entry_price_bucket = Counter(_entry_price_bucket(float(row["entry_price"])) for row in closed_stuck_trades)
     equity_rows = store.rows(
         f"""
         SELECT observed_at, total_equity, position_exposure
@@ -208,6 +218,13 @@ def _aggregate_for_runs(
         "markets_with_most_skips": markets_with_skips.most_common(5),
         "edge_distribution": _bucket_edges(edge_values),
         "pair_cost_distribution": _bucket_pair_costs(pair_cost_values),
+        "stuck_signal_count": len(stuck_rows),
+        "stuck_bucket_distribution": dict(stuck_bucket_distribution),
+        "average_stuck_cycles": _safe_avg([float(value) for value in stuck_cycles_values]),
+        "average_transition_probability": _safe_avg(transition_probabilities),
+        "result_by_bucket": dict(result_by_bucket),
+        "result_by_seconds_bucket": dict(result_by_seconds_bucket),
+        "result_by_entry_price_bucket": dict(result_by_entry_price_bucket),
         "market_rows": market_rows,
     }
 
@@ -258,6 +275,14 @@ def _section_lines(label: str, values: dict[str, Any], indent: str = "") -> list
     lines.append(f"{indent}edge_distribution={_fmt_map(values['edge_distribution'])}")
     if values["pair_cost_distribution"]:
         lines.append(f"{indent}pair_cost_distribution={_fmt_map(values['pair_cost_distribution'])}")
+    if values["stuck_signal_count"]:
+        lines.append(f"{indent}stuck_signals_found={values['stuck_signal_count']}")
+        lines.append(f"{indent}stuck_bucket_distribution={_fmt_map(values['stuck_bucket_distribution'])}")
+        lines.append(f"{indent}average_stuck_cycles={_fmt_float(values['average_stuck_cycles'])}")
+        lines.append(f"{indent}average_transition_probability={_fmt_float(values['average_transition_probability'])}")
+        lines.append(f"{indent}result_by_bucket={_fmt_map(values['result_by_bucket'])}")
+        lines.append(f"{indent}result_by_seconds_to_expiry_bucket={_fmt_map(values['result_by_seconds_bucket'])}")
+        lines.append(f"{indent}result_by_entry_price_bucket={_fmt_map(values['result_by_entry_price_bucket'])}")
     return lines
 
 
@@ -403,6 +428,34 @@ def _safe_avg(values: list[float]) -> float | None:
     if not values:
         return None
     return sum(values) / len(values)
+
+
+def _seconds_to_expiry_for_trade(row: Any) -> float:
+    opened_at = datetime.fromisoformat(str(row["opened_at"]).replace("Z", "+00:00"))
+    window_end = datetime.fromisoformat(str(row["window_end"]).replace("Z", "+00:00"))
+    return max(0.0, (window_end - opened_at).total_seconds())
+
+
+def _seconds_bucket(seconds_to_expiry: float) -> str:
+    if seconds_to_expiry < 60:
+        return "<60"
+    if seconds_to_expiry < 120:
+        return "60-120"
+    if seconds_to_expiry < 180:
+        return "120-180"
+    return "180+"
+
+
+def _entry_price_bucket(entry_price: float) -> str:
+    if entry_price < 0.03:
+        return "<0.03"
+    if entry_price < 0.05:
+        return "0.03-0.05"
+    if entry_price < 0.10:
+        return "0.05-0.10"
+    if entry_price < 0.25:
+        return "0.10-0.25"
+    return ">=0.25"
 
 
 def _max_simultaneous_positions(trade_rows: list[Any]) -> int:

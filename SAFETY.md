@@ -32,6 +32,7 @@ Phase 1 is paper-only by design.
 - Replay close modes such as `mark-to-market`, `expiry-if-known`, and `approximate-expiry` are paper-only accounting choices. They do not place orders and do not turn stored public data into a real settlement feed.
 - `--active-only` is a research filter only. It changes which stored market windows are evaluated; it does not loosen thresholds and does not create any execution path.
 - `--tiny` is a paper-only risk profile. It reduces fake notional and fake exposure; it does not connect the project to any venue or add an execution path.
+- `markov-report` and `stuck-markov` are paper-only analytics over stored market snapshots. They do not query authenticated APIs, do not place orders, and do not convert public observations into a live system.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
 - `reset --paper-results` deletes fake trades, fake opportunities, fake balances, equity snapshots, and run metadata only. Raw public/demo snapshots are preserved.
@@ -49,6 +50,7 @@ Report metrics are paper metrics only:
 - `Max position exposure` is reported separately from drawdown.
 - `Average PnL per trade`, `average win`, `average loss`, `profit factor`, and `expectancy per trade` are paper metrics only. They are accounting summaries, not evidence of live tradability.
 - Profit-concentration metrics such as top-trade PnL share, PnL excluding top trades, and low-price-entry contribution are skepticism tools. They are meant to expose whether modeled gains come from a few outsized binary payouts rather than repeatable small-profit behavior.
+- Stuck-state / Markov transitions are research heuristics only. A side price that stays near `0.74` for several cycles while BTC moves can still be noise, stale liquidity, or a misleading microstructure artifact.
 - `EXPIRED_UNRESOLVED` and `SETTLEMENT_UNAVAILABLE` are not fake profits. They are explicit paper outcomes for markets where replay cannot justify a settled result.
 - `approximate-expiry` is still research-only. It infers settlement from nearby stored exchange prices and can be wrong even when the accounting looks attractive.
 

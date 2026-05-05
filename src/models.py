@@ -172,3 +172,7 @@ class OpportunityDecision:
     seconds_to_expiry: float | None = None
     lifecycle_status: str | None = None
     timing_bucket: str | None = None
+    state_bucket: str | None = None
+    stuck_cycles: int | None = None
+    transition_probability: float | None = None
+    exchange_move: float | None = None

@@ -4,7 +4,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## Polymarket Official Docs
 
-- Useful for: public market discovery, public CLOB orderbook reads, field names, endpoint behavior, observe-mode capture, raw snapshot design, token-id extraction, active-market filtering, liquidity diagnostics, and validating whether discovered markets are real public markets or demo fixtures.
+- Useful for: public market discovery, public CLOB orderbook reads, field names, endpoint behavior, observe-mode capture, raw snapshot design, token-id extraction, active-market filtering, liquidity diagnostics, and validating whether discovered markets are real public markets or demo fixtures. Also useful for reasoning about repeated public orderbook observations and bucket-state transitions in short BTC markets.
 - Do not copy yet: authenticated trading flows, API key flows, wallet flows, signing, or order submission.
 - Safety warning: public reads are acceptable for Phase 2 and Phase 3; anything involving credentials or execution is out of scope.
 - Phase: Phase 2 and Phase 3 for public data capture; Phase 6 for source-aware readiness and market discovery audit; Phase 7 for directional-market discovery, token-id extraction, and public orderbook capture; later only if the project explicitly remains safety-reviewed.
@@ -27,7 +27,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 ## NautilusTrader
 
-- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, lifecycle/state transitions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, diagnostics, research-session modeling, settlement-state handling, and future event replay design.
+- Useful for: professional event-driven trading engine architecture, run metadata, ledgers, fills, positions, lifecycle/state transitions, risk controls, market-data boundaries, observe loops, source-aware replay boundaries, diagnostics, research-session modeling, settlement-state handling, Markov-style state modeling, and future event replay design.
 - Do not copy yet: broker adapters, live venues, account integrations, or execution clients.
 - Safety warning: this project should borrow concepts such as explicit events and accounting, not live connectivity.
 - Phase: Phase 3 as architectural inspiration for replay boundaries; Phase 6 for explicit demo/public data boundaries; later for richer event modeling.

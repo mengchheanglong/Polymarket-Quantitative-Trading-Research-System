@@ -37,6 +37,10 @@ class FakeFill:
     entry_fee: float
     slippage_cost: float
     entry_underlying_price: float
+    state_bucket: str | None = None
+    stuck_cycles: int | None = None
+    transition_probability: float | None = None
+    exchange_move: float | None = None
 
 
 class PaperTradingEngine:
@@ -199,6 +203,10 @@ class PaperTradingEngine:
             entry_fee=entry_fee,
             slippage_cost=slip,
             entry_underlying_price=price_snapshot.price,
+            state_bucket=decision.state_bucket,
+            stuck_cycles=decision.stuck_cycles,
+            transition_probability=decision.transition_probability,
+            exchange_move=decision.exchange_move,
         )
         self.store.open_trade(now, fill, run_id=self.run_id)
         self.store.set_balance(now, balance - total_cost, run_id=self.run_id)
@@ -308,6 +316,10 @@ class PaperTradingEngine:
                 entry_fee=entry_fee / 2.0,
                 slippage_cost=slip / 2.0,
                 entry_underlying_price=price_snapshot.price,
+                state_bucket=None,
+                stuck_cycles=None,
+                transition_probability=None,
+                exchange_move=None,
             ),
             FakeFill(
                 trade_id=str(uuid.uuid4()),
@@ -319,6 +331,10 @@ class PaperTradingEngine:
                 entry_fee=entry_fee / 2.0,
                 slippage_cost=slip / 2.0,
                 entry_underlying_price=price_snapshot.price,
+                state_bucket=None,
+                stuck_cycles=None,
+                transition_probability=None,
+                exchange_move=None,
             ),
         ]
         for fill in fills:
