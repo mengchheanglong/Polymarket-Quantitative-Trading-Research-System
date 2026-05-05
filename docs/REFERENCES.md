@@ -23,6 +23,7 @@ These are design references only. They do not authorize live trading, wallet sup
 - Also useful for: defining stricter paper-readiness criteria for a promoted research preset without treating paper results as evidence of live tradability.
 - Also useful for: directional audit workflows where one paper branch is treated as a hypothesis to falsify, including reverse-signal tests, side-correctness breakdowns, and ranking stricter paper variants by skepticism metrics rather than just raw PnL.
 - Also useful for: long-running dry-run session ergonomics, including progress metrics, wall-clock bounded collection loops, and avoiding duplicate analysis runs when validating one strategy branch repeatedly.
+- Also useful for: promoting one stricter paper preset as the main candidate while still forcing aggregate skepticism checks such as side correctness, PnL excluding top trades, and closed-trade-count progress before treating it as promising.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -60,6 +61,7 @@ Useful ideas:
 - conservative preset promotion ideas: narrower market filters, smaller paper exposure caps, and per-session validation before treating one strategy branch as the main research candidate
 - operational workflow ideas: collecting many short public sessions, then validating a conservative branch across them with explicit progress-to-readiness criteria instead of trusting one attractive session
 - directional audit ideas: comparing the normal paper signal against a reversed version, then checking whether side correctness, expectancy, and PnL excluding top trades improve under stricter paper-only filters
+- candidate-promotion ideas: giving the best paper-only filter set an explicit preset name, then validating it session by session instead of treating side-sweep output as the final workflow
 
 Do not copy yet:
 - live execution

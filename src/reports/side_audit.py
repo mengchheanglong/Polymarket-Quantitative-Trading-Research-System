@@ -122,6 +122,26 @@ def build_candidate_ranking_report(
     return "\n".join(lines)
 
 
+def build_candidate_comparison_report(
+    *,
+    source_filter: str,
+    session_scope: str,
+    rows: list[ConservativeAggregateRow],
+) -> str:
+    lines = [
+        "Candidate comparison",
+        "Research only: stored public snapshots, paper replay, no execution.",
+        f"Source filter: {source_filter}",
+        f"Session scope: {session_scope}",
+    ]
+    if not rows:
+        lines.append("No candidate variants produced a replay result.")
+        return "\n".join(lines)
+    for row in rows:
+        lines.append(_aggregate_line(row))
+    return "\n".join(lines)
+
+
 def _aggregate_line(row: ConservativeAggregateRow) -> str:
     return " | ".join(
         [

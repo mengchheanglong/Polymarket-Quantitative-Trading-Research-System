@@ -30,6 +30,7 @@ from src.reports.ledger import build_trade_ledger
 from src.reports.momentum_audit import build_momentum_audit_report
 from src.reports.config_view import parse_config_notes
 from src.reports.side_audit import (
+    build_candidate_comparison_report,
     build_candidate_ranking_report,
     build_side_audit_report,
     build_side_sweep_report,
@@ -86,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse"),
+        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse", "conservative-entry-30-70"),
         default=None,
         help="Apply a paper-only preset.",
     )
@@ -117,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
     replay_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse"),
+        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse", "conservative-entry-30-70"),
         default=None,
         help="Apply a paper-only preset.",
     )
@@ -224,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--until", help="Only export raw snapshots at or before this UTC ISO timestamp.")
     export_parser.add_argument("--session-id", help="Export only data tied to a research session when possible.")
     export_parser.add_argument("--validation", choices=("conservative",), default=None, help="Export a paper-validation package.")
+    export_parser.add_argument(
+        "--candidate",
+        choices=("conservative-entry-30-70",),
+        default=None,
+        help="Export the validation package for one named paper candidate.",
+    )
     close_mode_compare_parser = subcommands.add_parser("close-mode-compare", help="Compare replay close modes on stored snapshots")
     close_mode_compare_parser.add_argument("--strategy", choices=("momentum", "pair-cost", "stuck-markov"), required=True)
     close_mode_compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
@@ -270,11 +277,51 @@ def main(argv: list[str] | None = None) -> int:
     candidate_ranking_parser = subcommands.add_parser("candidate-ranking", help="Rank conservative momentum paper variants")
     candidate_ranking_parser.add_argument("--source", choices=("public", "all"), default="public")
     candidate_ranking_parser.add_argument("--session-id", help="Limit the ranking to one research session.")
+    compare_candidates_parser = subcommands.add_parser("compare-candidates", help="Compare the main conservative paper candidates")
+    compare_candidates_parser.add_argument("--source", choices=("public", "all"), default="public")
+    compare_candidates_parser.add_argument("--session-id", help="Limit the comparison to one research session.")
     conservative_report_parser = subcommands.add_parser("conservative-report", help="Validate the conservative tiny momentum preset across stored sessions")
     conservative_report_parser.add_argument("--source", choices=("public", "all"), default="public")
+    conservative_report_parser.add_argument(
+        "--preset",
+        choices=("conservative-tiny", "conservative-entry-30-70"),
+        default="conservative-entry-30-70",
+        help="Named paper-only momentum preset to aggregate.",
+    )
+    preset_report_parser = subcommands.add_parser("preset-report", help="Summarize one named conservative momentum preset across stored sessions")
+    preset_report_parser.add_argument("--source", choices=("public", "all"), default="public")
+    preset_report_parser.add_argument(
+        "--preset",
+        choices=("conservative-tiny", "conservative-entry-30-70"),
+        required=True,
+        help="Named paper-only momentum preset to aggregate.",
+    )
     validate_conservative_parser = subcommands.add_parser("validate-conservative", help="Create or reuse conservative momentum runs across replay-ready public sessions")
     validate_conservative_parser.add_argument("--source", choices=("public", "all"), default="public")
+    validate_conservative_parser.add_argument(
+        "--preset",
+        choices=("conservative-tiny", "conservative-entry-30-70"),
+        default="conservative-entry-30-70",
+        help="Named paper-only momentum preset to validate.",
+    )
     validate_conservative_parser.add_argument("--rerun", action="store_true", help="Re-run matching conservative sessions even if stored runs already exist.")
+    validate_candidate_parser = subcommands.add_parser("validate-candidate", help="Alias for validate-conservative using --candidate")
+    validate_candidate_parser.add_argument("--source", choices=("public", "all"), default="public")
+    validate_candidate_parser.add_argument(
+        "--candidate",
+        choices=("conservative-entry-30-70",),
+        required=True,
+        help="Named paper-only candidate preset to validate.",
+    )
+    validate_candidate_parser.add_argument("--rerun", action="store_true", help="Re-run matching candidate sessions even if stored runs already exist.")
+    candidate_report_parser = subcommands.add_parser("candidate-report", help="Alias for preset-report using --candidate")
+    candidate_report_parser.add_argument("--source", choices=("public", "all"), default="public")
+    candidate_report_parser.add_argument(
+        "--candidate",
+        choices=("conservative-entry-30-70",),
+        required=True,
+        help="Named paper-only candidate preset to summarize.",
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -357,10 +404,18 @@ def main(argv: list[str] | None = None) -> int:
             return side_sweep(config, args)
         if args.command == "candidate-ranking":
             return candidate_ranking(config, args)
+        if args.command == "compare-candidates":
+            return compare_candidates(config, args)
         if args.command == "conservative-report":
             return conservative_report(config, args)
+        if args.command == "preset-report":
+            return preset_report(config, args)
         if args.command == "validate-conservative":
             return validate_conservative(config, args)
+        if args.command == "validate-candidate":
+            return validate_candidate(config, args)
+        if args.command == "candidate-report":
+            return candidate_report(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -1119,6 +1174,10 @@ def export_data(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         session_id, since, until = _resolved_time_filters(store, args)
+        candidate = getattr(args, "candidate", None)
+        validation = getattr(args, "validation", None)
+        if candidate is not None and validation is None:
+            validation = "conservative"
         paths = export_csv(
             store,
             args.out,
@@ -1126,7 +1185,8 @@ def export_data(config: AgentConfig, args) -> int:
             since=since,
             until=until,
             session_id=session_id,
-            validation=getattr(args, "validation", None),
+            validation=validation,
+            candidate=candidate,
         )
         print("Export complete.")
         for path in paths:
@@ -1465,11 +1525,43 @@ def candidate_ranking(config: AgentConfig, args) -> int:
     return 0
 
 
+def compare_candidates(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    store = SQLiteStore(config.database_path)
+    try:
+        session_scope = getattr(args, "session_id", None) or "all ready public sessions"
+        rows = _side_sweep_variant_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
+        selected_labels = (
+            "conservative-tiny",
+            "conservative-entry-30-70",
+            "reverse conservative",
+            "entry-0.40-0.75",
+            "DOWN-only",
+            "expiry-120-180",
+        )
+        selected_rows = [row for row in rows if row.label in selected_labels]
+        print(build_candidate_comparison_report(source_filter=source_filter, session_scope=session_scope, rows=selected_rows))
+    finally:
+        store.close()
+    return 0
+
+
 def conservative_report(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
     data_store = SQLiteStore(config.database_path)
     try:
-        print(_build_conservative_report_text(data_store, config, source_filter))
+        preset = getattr(args, "preset", None) or "conservative-entry-30-70"
+        print(_build_preset_report_text(data_store, config, source_filter, preset))
+    finally:
+        data_store.close()
+    return 0
+
+
+def preset_report(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    data_store = SQLiteStore(config.database_path)
+    try:
+        print(_build_preset_report_text(data_store, config, source_filter, args.preset))
     finally:
         data_store.close()
     return 0
@@ -1477,28 +1569,30 @@ def conservative_report(config: AgentConfig, args) -> int:
 
 def validate_conservative(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    preset = getattr(args, "preset", None) or "conservative-entry-30-70"
     rerun = bool(getattr(args, "rerun", False))
     store = SQLiteStore(config.database_path)
     try:
-        ready_sessions = []
-        for session in store.research_session_rows():
-            session_id = str(session["session_id"])
-            _, since, until = _session_bounds(store, session_id)
-            readiness_result = store.readiness(source_filter=source_filter, since=since, until=until, session_id=session_id)
-            if readiness_result["verdict"] == "READY_FOR_PUBLIC_REPLAY":
-                ready_sessions.append((session_id, since, until))
+        ready_sessions = _ready_public_sessions(store, source_filter=source_filter)
         print("Conservative validation")
         print(f"Source filter: {source_filter}")
+        print(f"Preset: {preset}")
         print(f"Ready sessions found: {len(ready_sessions)}")
         if not ready_sessions:
             print("No replay-ready public sessions found.")
             return 0
         validation_config = _replace_close_mode(
-            _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+            _replace_strategy(_apply_named_preset(config, preset), "momentum"),
             "approximate-expiry",
         )
         for session_id, since, until in ready_sessions:
-            existing_run = None if rerun else _matching_conservative_run(store, session_id, source_filter)
+            existing_run = None if rerun else _matching_momentum_run(
+                store,
+                session_id=session_id,
+                source_filter=source_filter,
+                preset=validation_config.momentum_preset or preset,
+                reverse_signal=validation_config.reverse_signal,
+            )
             if existing_run is not None:
                 print(f"{session_id} | reused_run_id={existing_run['run_id']} | realized_pnl={_fmt_money(existing_run['realized_pnl'])}")
                 continue
@@ -1524,10 +1618,22 @@ def validate_conservative(config: AgentConfig, args) -> int:
                 f"{session_id} | created_run_id={outcome['run_id']} | accepted={outcome['accepted']} | "
                 f"skipped={outcome['skipped']} | closed={outcome['closed']}"
             )
-        print(_build_conservative_report_text(store, config, source_filter))
+        print(_build_preset_report_text(store, config, source_filter, preset))
     finally:
         store.close()
     return 0
+
+
+def validate_candidate(config: AgentConfig, args) -> int:
+    alias_args = argparse.Namespace(**vars(args))
+    alias_args.preset = args.candidate
+    return validate_conservative(config, alias_args)
+
+
+def candidate_report(config: AgentConfig, args) -> int:
+    alias_args = argparse.Namespace(**vars(args))
+    alias_args.preset = args.candidate
+    return preset_report(config, alias_args)
 
 
 def readiness(config: AgentConfig, args) -> int:
@@ -2756,11 +2862,11 @@ def _side_sweep_variant_rows(
 
 def _side_sweep_variants(config: AgentConfig) -> list[tuple[str, AgentConfig]]:
     return [
-        ("normal conservative", config),
+        ("conservative-tiny", config),
         ("reverse conservative", _replace_config_values(config, momentum_preset="conservative-tiny-reverse", reverse_signal=True)),
+        ("conservative-entry-30-70", _apply_named_preset(config, "conservative-entry-30-70")),
         ("higher-min-edge", _replace_config_values(config, min_edge=max(config.min_edge, 0.05))),
         ("lower-max-spread", _replace_config_values(config, max_spread=min(config.max_spread, 0.01))),
-        ("entry-0.30-0.70", _replace_config_values(config, momentum_min_entry_price=0.30, momentum_max_entry_price=0.70)),
         ("entry-0.40-0.75", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.75)),
         ("entry-0.20-0.80", _replace_config_values(config, momentum_min_entry_price=0.20, momentum_max_entry_price=0.80)),
         ("BTC-only", _replace_config_values(config, momentum_asset_filter="BTC", momentum_duration_filter=None)),
@@ -2774,10 +2880,11 @@ def _side_sweep_variants(config: AgentConfig) -> list[tuple[str, AgentConfig]]:
     ]
 
 
-def _build_conservative_report_text(
+def _build_preset_report_text(
     data_store: SQLiteStore,
     config: AgentConfig,
     source_filter: str,
+    preset: str,
 ) -> str:
     sessions = [
         row
@@ -2785,16 +2892,16 @@ def _build_conservative_report_text(
         if data_store.dataset_summary(source_filter=source_filter, session_id=str(row["session_id"]))["total_snapshots"] > 0
     ]
     baseline_config = _replace_close_mode(
-        _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+        _replace_strategy(_apply_named_preset(config, preset), "momentum"),
         "approximate-expiry",
     )
     session_payloads: list[dict] = []
     variant_payloads: dict[str, list[dict]] = {
-        "BTC-only conservative": [],
-        "ETH-only conservative": [],
-        "BTC+ETH conservative": [],
-        "5m-only conservative": [],
-        "15m-only conservative": [],
+        "BTC-only candidate": [],
+        "ETH-only candidate": [],
+        "BTC+ETH candidate": [],
+        "5m-only candidate": [],
+        "15m-only candidate": [],
     }
     for session in sessions:
         session_id = str(session["session_id"])
@@ -2803,16 +2910,16 @@ def _build_conservative_report_text(
             data_store=data_store,
             source_filter=source_filter,
             session_id=session_id,
-            label="conservative-tiny",
+            label=preset,
         )
         if baseline["ok"]:
             session_payloads.append(baseline)
         variant_specs = [
-            ("BTC-only conservative", {}),
-            ("ETH-only conservative", {"momentum_asset_filter": "ETH"}),
-            ("BTC+ETH conservative", {"momentum_asset_filter": None}),
-            ("5m-only conservative", {"momentum_duration_filter": "5m"}),
-            ("15m-only conservative", {"momentum_duration_filter": "15m"}),
+            ("BTC-only candidate", {}),
+            ("ETH-only candidate", {"momentum_asset_filter": "ETH"}),
+            ("BTC+ETH candidate", {"momentum_asset_filter": None}),
+            ("5m-only candidate", {"momentum_duration_filter": "5m"}),
+            ("15m-only candidate", {"momentum_duration_filter": "15m"}),
         ]
         for label, overrides in variant_specs:
             variant = _conservative_variant_summary(
@@ -2847,7 +2954,7 @@ def _build_conservative_report_text(
         )
         for payload in session_payloads
     ]
-    aggregate = aggregate_variant_row(label="conservative-tiny", session_rows=session_payloads)
+    aggregate = aggregate_variant_row(label=preset, session_rows=session_payloads)
     variant_rows = [
         aggregate_variant_row(label=label, session_rows=rows)
         for label, rows in variant_payloads.items()
@@ -2855,6 +2962,7 @@ def _build_conservative_report_text(
     ]
     return build_conservative_report(
         source_filter=source_filter,
+        preset_name=preset,
         preset_summary=_conservative_preset_summary(baseline_config),
         session_rows=session_rows,
         aggregate_row=aggregate,
@@ -3284,6 +3392,7 @@ def _apply_named_preset(config: AgentConfig, preset: str) -> AgentConfig:
         "balanced-tiny": "balanced-tiny-momentum",
         "conservative-tiny": "conservative-tiny-momentum",
         "conservative-tiny-reverse": "conservative-tiny-reverse",
+        "conservative-entry-30-70": "conservative-entry-30-70",
     }
     if preset in mapping:
         return _apply_momentum_preset(config, mapping[preset])
@@ -3308,6 +3417,20 @@ def _apply_momentum_preset(config: AgentConfig, preset: str) -> AgentConfig:
             momentum_duration_filter="5m",
             momentum_min_entry_price=0.05,
             momentum_max_entry_price=0.85,
+            min_edge=max(base.min_edge, 0.03),
+            max_spread=min(base.max_spread, 0.02),
+            max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),
+            min_seconds_to_expiry=60,
+            max_seconds_to_expiry=180,
+        )
+    if preset == "conservative-entry-30-70":
+        return _replace_config_values(
+            base,
+            momentum_preset="conservative-entry-30-70",
+            momentum_asset_filter="BTC",
+            momentum_duration_filter="5m",
+            momentum_min_entry_price=0.30,
+            momentum_max_entry_price=0.70,
             min_edge=max(base.min_edge, 0.03),
             max_spread=min(base.max_spread, 0.02),
             max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),
@@ -3340,28 +3463,6 @@ def _conservative_preset_summary(config: AgentConfig) -> str:
         f"min_seconds_to_expiry={config.min_seconds_to_expiry if config.min_seconds_to_expiry is not None else 'none'} | "
         f"max_seconds_to_expiry={config.max_seconds_to_expiry if config.max_seconds_to_expiry is not None else 'none'}"
     )
-
-
-def _matching_conservative_run(store: SQLiteStore, session_id: str, source_filter: str) -> object | None:
-    rows = store.rows(
-        """
-        SELECT *
-        FROM runs
-        WHERE session_id = ? AND strategy = 'momentum' AND data_source = ?
-        ORDER BY started_at DESC, rowid DESC
-        """,
-        (session_id, source_filter),
-    )
-    for row in rows:
-        notes = parse_config_notes(str(row["notes"] or ""))
-        if (
-            notes.get("momentum_preset") == "conservative-tiny"
-            and notes.get("reverse_signal", "false") != "true"
-            and notes.get("active_only") == "true"
-            and notes.get("close_mode") == "approximate-expiry"
-        ):
-            return row
-    return None
 
 
 def _effective_expiry_filters(config: AgentConfig, args) -> tuple[int | None, int | None]:

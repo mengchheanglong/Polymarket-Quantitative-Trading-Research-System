@@ -18,6 +18,19 @@ def test_conservative_named_preset_alias():
     assert preset.max_total_exposure_usd == 5.0
 
 
+def test_conservative_entry_30_70_named_preset():
+    preset = _apply_named_preset(AgentConfig(), "conservative-entry-30-70")
+    assert preset.tiny_profile is True
+    assert preset.momentum_preset == "conservative-entry-30-70"
+    assert preset.momentum_asset_filter == "BTC"
+    assert preset.momentum_duration_filter == "5m"
+    assert preset.momentum_min_entry_price == 0.30
+    assert preset.momentum_max_entry_price == 0.70
+    assert preset.max_total_exposure_usd == 5.0
+    assert preset.min_seconds_to_expiry == 60
+    assert preset.max_seconds_to_expiry == 180
+
+
 def test_conservative_readiness_verdicts():
     assert conservative_readiness_verdict(
         closed_trades=60,
@@ -87,15 +100,17 @@ def test_conservative_report_output_and_variants(tmp_path, capsys):
     assert main(["--db", str(db_path), "conservative-report", "--source", "public"]) == 0
     output = capsys.readouterr().out
     assert "Conservative report" in output
+    assert "Preset name: conservative-entry-30-70" in output
     assert "Per-session conservative results:" in output
     assert "Aggregate conservative result:" in output
-    assert "BTC-only conservative" in output
-    assert "ETH-only conservative" in output
-    assert "BTC+ETH conservative" in output
-    assert "5m-only conservative" in output
-    assert "15m-only conservative" in output
+    assert "BTC-only candidate" in output
+    assert "ETH-only candidate" in output
+    assert "BTC+ETH candidate" in output
+    assert "5m-only candidate" in output
+    assert "15m-only candidate" in output
     assert "Side correctness by asset:" in output
     assert "Closed trades progress:" in output
+    assert "Observation recommendation:" in output
     assert "Profitable sessions:" in output
     assert "Aggregate verdict:" in output
 
@@ -127,6 +142,103 @@ def test_validate_conservative_reuses_existing_runs_and_can_rerun(tmp_path):
         assert third_count > second_count
     finally:
         store.close()
+
+
+def test_preset_report_and_compare_candidates(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    _seed_session_dataset(db_path, include_end_price=False, later_midpoint=None, include_settlement=False)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-conservative",
+            "--preset",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "preset-report",
+            "--preset",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    report_output = capsys.readouterr().out
+    assert "Preset name: conservative-entry-30-70" in report_output
+    assert "Closed trades still needed:" in report_output
+    assert "Approximate sessions still needed:" in report_output
+
+    assert main(["--db", str(db_path), "compare-candidates", "--source", "public"]) == 0
+    compare_output = capsys.readouterr().out
+    assert "Candidate comparison" in compare_output
+    assert "conservative-tiny" in compare_output
+    assert "conservative-entry-30-70" in compare_output
+    assert "reverse conservative" in compare_output
+    assert "entry-0.40-0.75" in compare_output
+    assert "DOWN-only" in compare_output
+    assert "expiry-120-180" in compare_output
+
+
+def test_candidate_alias_commands_and_export(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    out_dir = tmp_path / "exports"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    validate_output = capsys.readouterr().out
+    assert "Conservative validation" in validate_output
+    assert "Preset: conservative-entry-30-70" in validate_output
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "candidate-report",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    report_output = capsys.readouterr().out
+    assert "Preset name: conservative-entry-30-70" in report_output
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "export",
+            "--format",
+            "csv",
+            "--out",
+            str(out_dir),
+            "--candidate",
+            "conservative-entry-30-70",
+        ]
+    ) == 0
+    exported = {path.name for path in out_dir.glob("*.csv")}
+    assert "runs.csv" in exported
+    runs_text = (out_dir / "runs.csv").read_text(encoding="utf-8")
+    assert "conservative-entry-30-70" in runs_text
 
 
 def test_validation_export_package(tmp_path):

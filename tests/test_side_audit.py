@@ -182,9 +182,9 @@ def test_side_sweep_and_candidate_ranking(tmp_path, capsys):
     assert main(["--db", str(db_path), "side-sweep", "--source", "public"]) == 0
     sweep_output = capsys.readouterr().out
     assert "Side sweep" in sweep_output
-    assert "normal conservative" in sweep_output
+    assert "conservative-tiny" in sweep_output
     assert "reverse conservative" in sweep_output
-    assert "entry-0.30-0.70" in sweep_output
+    assert "conservative-entry-30-70" in sweep_output
     assert "expiry-60-120" in sweep_output
 
     assert main(["--db", str(db_path), "candidate-ranking", "--source", "public"]) == 0

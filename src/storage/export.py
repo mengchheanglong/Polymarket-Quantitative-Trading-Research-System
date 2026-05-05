@@ -25,6 +25,7 @@ def export_csv(
     until: datetime | None = None,
     session_id: str | None = None,
     validation: str | None = None,
+    candidate: str | None = None,
 ) -> list[Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -36,6 +37,7 @@ def export_csv(
         until=until,
         session_id=session_id,
         validation=validation,
+        candidate=candidate,
     )
     for name in rows_by_name:
         rows = rows_by_name[name]
@@ -60,9 +62,14 @@ def _filtered_rows(
     until: datetime | None,
     session_id: str | None,
     validation: str | None,
+    candidate: str | None,
 ) -> dict[str, list]:
     if validation == "conservative":
-        return _conservative_validation_rows(store, source_filter=source_filter or "public")
+        return _conservative_validation_rows(
+            store,
+            source_filter=source_filter or "public",
+            candidate=candidate,
+        )
     if source_filter is None and since is None and until is None and session_id is None:
         return {name: store.rows(query) for name, query in EXPORT_QUERIES.items()}
 
@@ -122,7 +129,12 @@ def _filtered_rows(
     }
 
 
-def _conservative_validation_rows(store: SQLiteStore, source_filter: str) -> dict[str, list]:
+def _conservative_validation_rows(
+    store: SQLiteStore,
+    source_filter: str,
+    candidate: str | None = None,
+) -> dict[str, list]:
+    target_preset = candidate or "conservative-tiny"
     run_rows = [
         row
         for row in store.rows(
@@ -136,7 +148,7 @@ def _conservative_validation_rows(store: SQLiteStore, source_filter: str) -> dic
             """,
             (source_filter,),
         )
-        if "momentum_preset=conservative-tiny" in str(row["notes"] or "")
+        if f"momentum_preset={target_preset}" in str(row["notes"] or "")
     ]
     run_ids = [str(row["run_id"]) for row in run_rows]
     session_ids = sorted({str(row["session_id"]) for row in run_rows if row["session_id"]})

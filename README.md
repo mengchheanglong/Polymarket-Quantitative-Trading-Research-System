@@ -324,6 +324,34 @@ The key question is no longer whether one small paper run made money. The key qu
 
 This is still not proof of live profitability. Reverse-signal tests, side-correctness audits, and candidate rankings are all built from stored public snapshots and approximate paper settlement logic only.
 
+Phase 19 promotes `conservative-entry-30-70` as the current main paper validation candidate:
+
+```powershell
+python -m src.main replay --strategy momentum --preset conservative-entry-30-70 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main validate-conservative --preset conservative-entry-30-70 --source public
+python -m src.main preset-report --preset conservative-entry-30-70 --source public
+python -m src.main compare-candidates --source public
+```
+
+This preset keeps the repo in paper-only tiny mode and narrows the conservative branch further:
+
+- BTC-only
+- 5-minute markets only
+- entry price `0.30-0.70`
+- `MAX_TRADE_USD=1.00`
+- `MAX_TOTAL_EXPOSURE_USD=5.00`
+- `MAX_SPREAD=0.02`
+- `MIN_EDGE=0.03`
+- expiry window `60-180` seconds
+
+It is the main paper candidate because it currently has the cleanest mix of side correctness, expectancy, and reduced profit concentration. It is still not live-ready. `preset-report` and `validate-conservative --preset conservative-entry-30-70` track progress toward the paper-readiness gate:
+
+- closed trades toward `50`
+- side correctness toward `55%`
+- PnL excluding top 3 trades staying positive
+- top-1 trade contribution staying below `40%`
+- per-session and aggregate verdicts staying out of `TAIL_RISK_DOMINATED`
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

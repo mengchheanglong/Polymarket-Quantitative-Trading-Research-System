@@ -178,9 +178,12 @@ python -m src.main close-divergence --strategy momentum --source public --sessio
 python -m src.main momentum-audit --source public --session-id <session_id> --tiny
 python -m src.main conservative-report --source public
 python -m src.main validate-conservative --source public
+python -m src.main validate-conservative --preset conservative-entry-30-70 --source public
+python -m src.main preset-report --preset conservative-entry-30-70 --source public
 python -m src.main replay --strategy momentum --preset conservative-tiny-reverse --source public --session-id <session_id> --active-only --close-mode approximate-expiry
 python -m src.main side-sweep --source public
 python -m src.main candidate-ranking --source public
+python -m src.main compare-candidates --source public
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -276,6 +279,7 @@ Public discovery process:
 - `conservative-tiny-reverse` and `--reverse-signal` are paper-only research tools. They use the same tiny risk controls and entry filters, but flip `UP` to `DOWN` and `DOWN` to `UP` so the repo can test whether the conservative momentum side is backward.
 - `side-sweep` compares the normal conservative branch, the reverse branch, and tighter filtered variants such as higher edge, lower spread, narrower entry-price bands, asset filters, side filters, duration filters, and tighter expiry windows.
 - `candidate-ranking` ranks those paper candidates by side correctness, expectancy, closed trades, PnL excluding top trades, concentration, drawdown, exposure, and verdicts.
+- `conservative-entry-30-70` is the current main paper validation candidate. It is still paper-only and still not live-ready. Use `validate-conservative --preset conservative-entry-30-70 --source public` and `preset-report --preset conservative-entry-30-70 --source public` to track progress toward the paper-readiness gate.
 - `close-divergence` compares trade-level outcomes between `mark-to-market` and `approximate-expiry` on the same stored session.
 - `momentum-audit` runs paper-only filter experiments such as `UP` only, `DOWN` only, `BTC` only, `ETH` only, `5m` only, `15m` only, tighter expiry windows, and the `balanced-tiny-momentum` / `conservative-tiny-momentum` research presets.
 - Tiny momentum remains under audit. Positive mark-to-market output is not enough if approximate-expiry is weak or directionally wrong.

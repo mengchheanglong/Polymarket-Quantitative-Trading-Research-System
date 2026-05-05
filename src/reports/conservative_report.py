@@ -52,6 +52,7 @@ class ConservativeAggregateRow:
 def build_conservative_report(
     *,
     source_filter: str,
+    preset_name: str,
     preset_summary: str,
     session_rows: list[ConservativeSessionRow],
     aggregate_row: ConservativeAggregateRow,
@@ -64,6 +65,7 @@ def build_conservative_report(
         "Conservative report",
         "Research only: stored public snapshots, paper replay, no execution.",
         f"Source filter: {source_filter}",
+        f"Preset name: {preset_name}",
         f"Preset: {preset_summary}",
         f"Sessions tested: {len(session_rows)}",
     ]
@@ -109,6 +111,19 @@ def build_conservative_report(
     lines.append(f"Sessions tested: {len(session_rows)}")
     lines.append(f"Profitable sessions: {profitable_sessions}")
     lines.append(f"Losing sessions: {losing_sessions}")
+    remaining_closed = max(0, 50 - aggregate_row.closed_trades)
+    trades_per_session = (aggregate_row.closed_trades / len(session_rows)) if session_rows else None
+    sessions_needed = math.ceil(remaining_closed / trades_per_session) if trades_per_session and trades_per_session > 0 else None
+    lines.append("Observation recommendation:")
+    lines.append(f"Closed trades still needed: {remaining_closed}")
+    lines.append(
+        "Approximate sessions still needed: "
+        + (str(sessions_needed) if sessions_needed is not None else "n/a")
+    )
+    lines.append(
+        "Current candidate trend: "
+        + _trend_label(session_rows)
+    )
     lines.append("BTC/ETH and duration comparisons:")
     for row in variant_rows:
         lines.append(_aggregate_line(row))
@@ -293,3 +308,28 @@ def _fmt_pct(value: float | None) -> str:
     if value is None or math.isnan(value):
         return "n/a"
     return f"{value:.2%}"
+
+
+def _trend_label(session_rows: list[ConservativeSessionRow]) -> str:
+    if len(session_rows) < 2:
+        return "insufficient history"
+    last = session_rows[-1]
+    prior = session_rows[:-1]
+    prior_expectancy = sum((row.expectancy or 0.0) for row in prior) / len(prior)
+    last_expectancy = last.expectancy or 0.0
+    prior_correctness_values = [row.side_correctness_rate for row in prior if row.side_correctness_rate is not None]
+    prior_correctness = (
+        sum(prior_correctness_values) / len(prior_correctness_values)
+        if prior_correctness_values
+        else None
+    )
+    last_correctness = last.side_correctness_rate
+    if last_expectancy > prior_expectancy and (
+        prior_correctness is None or last_correctness is None or last_correctness >= prior_correctness
+    ):
+        return "improving"
+    if last_expectancy < prior_expectancy and (
+        prior_correctness is None or last_correctness is None or last_correctness <= prior_correctness
+    ):
+        return "degrading"
+    return "mixed"
