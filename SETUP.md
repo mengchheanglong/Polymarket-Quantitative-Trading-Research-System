@@ -60,7 +60,10 @@ Observe public snapshots repeatedly without trading:
 ```powershell
 python -m src.main observe --duration-minutes 5 --interval-seconds 15
 python -m src.main observe --cycles 3 --interval-seconds 0
+python -m src.main observe --profile conservative-momentum --duration-minutes 60 --interval-seconds 15
 ```
+
+`--duration-minutes` is wall-clock bounded. If a cycle takes longer than the requested interval, the next cycle starts immediately and the loop stops once the requested elapsed duration has been reached.
 
 Inspect stored research sessions:
 
@@ -172,6 +175,7 @@ python -m src.main signal-audit --run-id <run_id>
 python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --active-only --tiny
 python -m src.main momentum-audit --source public --session-id <session_id> --tiny
 python -m src.main conservative-report --source public
+python -m src.main validate-conservative --source public
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -262,6 +266,7 @@ Public discovery process:
 - `signal-audit` checks whether the chosen momentum side matched the approximate-expiry direction implied by stored exchange prices near market start and expiry.
 - `conservative-tiny` is the current main momentum research preset. It keeps the paper engine in tiny mode, prefers BTC 5-minute markets, tightens the edge/spread window, blocks very low and very high entries, and caps total paper exposure at `$5.00`.
 - `conservative-report` replays that preset across all stored public sessions using stored snapshots only, then reports side correctness, top-trade concentration, PnL excluding top trades, BTC-vs-ETH comparisons, 5m-vs-15m comparisons, and paper-readiness verdicts.
+- `validate-conservative` is the session runner for that report. It finds replay-ready public sessions, reuses matching conservative runs if they already exist, creates missing ones, and prints updated paper-readiness progress.
 - `close-divergence` compares trade-level outcomes between `mark-to-market` and `approximate-expiry` on the same stored session.
 - `momentum-audit` runs paper-only filter experiments such as `UP` only, `DOWN` only, `BTC` only, `ETH` only, `5m` only, `15m` only, tighter expiry windows, and the `balanced-tiny-momentum` / `conservative-tiny-momentum` research presets.
 - Tiny momentum remains under audit. Positive mark-to-market output is not enough if approximate-expiry is weak or directionally wrong.

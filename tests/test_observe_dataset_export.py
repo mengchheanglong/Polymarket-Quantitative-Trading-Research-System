@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 from src.main import main
 from src.models import Asset, Candle, DiscoveredMarket, Market, MarketClassification, OrderBook, OrderLevel, PriceSnapshot, TimingWindow
 from src.storage.sqlite import SQLiteStore
@@ -246,6 +245,69 @@ def test_reset_paper_results_preserves_observed_snapshots_and_reset_all_deletes(
         assert store.rows("SELECT COUNT(*) AS count FROM trades")[0]["count"] == 0
     finally:
         store.close()
+
+
+def test_observe_duration_uses_wall_clock_elapsed_and_no_extra_sleep(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+
+    class FakeClock:
+        def __init__(self):
+            self.now = 0.0
+            self.sleeps: list[float] = []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    clock = FakeClock()
+    calls = {"count": 0}
+
+    def fake_collect(config, session_id=None):
+        calls["count"] += 1
+        store = SQLiteStore(config.database_path)
+        try:
+            ts = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc) + timedelta(seconds=calls["count"])
+            store.log_raw_snapshot(ts, "wall-clock-test", "BTC", "exchange_price", {"price": 1.0}, session_id=session_id)
+        finally:
+            store.close()
+        clock.now += 40.0
+        return 0
+
+    monkeypatch.setattr("src.main.collect", fake_collect)
+    monkeypatch.setattr("src.main.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("src.main.time.sleep", clock.sleep)
+
+    assert main(["--db", str(db_path), "observe", "--duration-minutes", "1", "--interval-seconds", "15"]) == 0
+    output = capsys.readouterr().out
+    assert calls["count"] == 2
+    assert clock.sleeps == []
+    assert "actual_duration_seconds=80.00" in output
+    assert "avg_cycle_duration_seconds=40.00" in output
+
+
+def test_observe_profile_is_recorded_and_summary_printed(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    monkeypatch.setattr("src.main.FallbackExchangeCollector", lambda _collectors: FakeExchange())
+    monkeypatch.setattr("src.main.PolymarketPublicCollector", FakePolymarket)
+
+    assert main(["--db", str(db_path), "observe", "--profile", "conservative-momentum", "--cycles", "1", "--interval-seconds", "0"]) == 0
+    output = capsys.readouterr().out
+    assert "Observe performance:" in output
+
+    store = SQLiteStore(db_path)
+    try:
+        session = store.latest_research_session()
+        assert session is not None
+        assert "profile=conservative-momentum" in str(session["notes"] or "")
+    finally:
+        store.close()
+
+    assert main(["--db", str(db_path), "session-report", "--latest"]) == 0
+    report_out = capsys.readouterr().out
+    assert "Observe profile: conservative-momentum" in report_out
 
     assert main(["--db", str(db_path), "reset", "--all"]) == 0
     store = SQLiteStore(db_path)

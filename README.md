@@ -293,6 +293,21 @@ Baseline tiny momentum is not trusted as a main candidate. Conservative tiny mom
 
 Paper-readiness is deliberately strict. `PAPER_PROMISING` requires at least 50 closed trades, positive realized PnL, positive expectancy, positive PnL after removing the top 3 trades, limited top-trade concentration, side correctness above 55%, acceptable drawdown, and no safety violations. Most runs should still land in `NEEDS_MORE_DATA`, `TAIL_RISK_DOMINATED`, `NEGATIVE_EXPECTANCY`, `DIRECTIONAL_SIGNAL_FAILED`, or `INSUFFICIENT_CLOSED_TRADES`.
 
+Phase 17 tightens the public-data collection workflow around that conservative candidate:
+
+```powershell
+python -m src.main observe --duration-minutes 60 --interval-seconds 15
+python -m src.main observe --profile conservative-momentum --duration-minutes 60 --interval-seconds 15
+python -m src.main validate-conservative --source public
+python -m src.main export --format csv --out exports --validation conservative
+```
+
+`observe --duration-minutes` is now wall-clock bounded. It stops when the requested elapsed time is reached instead of blindly chasing a precomputed cycle count. Each cycle prints its own duration and effective interval, and the final summary reports average cycle duration, min/max cycle duration, effective cycles per hour, snapshot counts, failures, markets found, and captured orderbooks.
+
+`--profile conservative-momentum` is still public-data collection only. In this phase it labels the session for the current main candidate rather than changing the safety boundary or adding any execution path.
+
+`validate-conservative` scans replay-ready public sessions, reuses matching stored conservative runs when they already exist, re-runs them only with `--rerun`, and then prints the aggregate conservative report. This is the safest way to track progress toward paper-readiness without mixing baseline momentum runs back into the main research candidate.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

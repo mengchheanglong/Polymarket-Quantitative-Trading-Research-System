@@ -22,6 +22,7 @@ Phase 1 is paper-only by design.
 - Public market discovery records accepted and rejected candidates, token-id status, and public orderbook status for research auditability.
 - If public token IDs or public orderbooks are missing, public replay refuses clearly instead of substituting demo data.
 - Observe mode only collects public snapshots. It never simulates trades or executes trades.
+- Observe duration is wall-clock bounded. That is an operational safeguard for research sessions only; it does not alter what data is collected or add any external control path.
 - Observe mode creates research sessions, keeps partial data on interruption, and never deletes data automatically.
 - Dataset, readiness, market audit, and export commands can separate demo snapshots from public snapshots.
 - Session reports and research reports summarize stored public research data only. They do not authorize trading and do not call authenticated APIs.
@@ -36,6 +37,7 @@ Phase 1 is paper-only by design.
 - `signal-audit`, `close-divergence`, and `momentum-audit` are paper-only audit commands. They replay stored snapshots or inspect stored runs only.
 - `conservative-tiny` is a paper-only preset. It narrows momentum research to a smaller, stricter subset of the stored public market windows, but it does not create any execution path.
 - `conservative-report` is a paper-only validation command. It replays stored sessions with the conservative preset only, aggregates skepticism metrics such as top-trade concentration and side correctness, and never calls authenticated APIs.
+- `validate-conservative` is also paper-only. It may create additional stored replay runs, but only by replaying already-collected public snapshots inside SQLite. It still cannot place orders or touch authenticated APIs.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
 - Tiny momentum is not trusted just because mark-to-market looks positive. Phase 15 explicitly checks accepted-trade edge, side correctness at approximate expiry, and whether close-mode disagreement is large enough to invalidate the paper result.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.

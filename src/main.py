@@ -28,6 +28,7 @@ from src.reports.dataset import build_dataset_summary
 from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
 from src.reports.momentum_audit import build_momentum_audit_report
+from src.reports.config_view import parse_config_notes
 from src.reports.settlement import build_settlement_report
 from src.reports.signal_audit import (
     build_signal_audit,
@@ -171,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     observe_parser.add_argument("--duration-minutes", type=float, default=None, help="Maximum observe duration.")
     observe_parser.add_argument("--interval-seconds", type=float, default=15.0, help="Seconds between cycles.")
     observe_parser.add_argument("--cycles", type=int, default=None, help="Maximum cycles, useful for tests.")
+    observe_parser.add_argument("--profile", choices=("conservative-momentum",), default=None, help="Label a public-data collection profile.")
     subcommands.add_parser("sessions", help="List public-data research sessions")
     session_report_parser = subcommands.add_parser("session-report", help="Summarize a research observation session")
     session_report_parser.add_argument("--session-id", help="Show a specific session.")
@@ -214,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--since", help="Only export raw snapshots at or after this UTC ISO timestamp.")
     export_parser.add_argument("--until", help="Only export raw snapshots at or before this UTC ISO timestamp.")
     export_parser.add_argument("--session-id", help="Export only data tied to a research session when possible.")
+    export_parser.add_argument("--validation", choices=("conservative",), default=None, help="Export a paper-validation package.")
     close_mode_compare_parser = subcommands.add_parser("close-mode-compare", help="Compare replay close modes on stored snapshots")
     close_mode_compare_parser.add_argument("--strategy", choices=("momentum", "pair-cost", "stuck-markov"), required=True)
     close_mode_compare_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
@@ -251,6 +254,9 @@ def main(argv: list[str] | None = None) -> int:
     momentum_audit_parser.add_argument("--tiny", action="store_true")
     conservative_report_parser = subcommands.add_parser("conservative-report", help="Validate the conservative tiny momentum preset across stored sessions")
     conservative_report_parser.add_argument("--source", choices=("public", "all"), default="public")
+    validate_conservative_parser = subcommands.add_parser("validate-conservative", help="Create or reuse conservative momentum runs across replay-ready public sessions")
+    validate_conservative_parser.add_argument("--source", choices=("public", "all"), default="public")
+    validate_conservative_parser.add_argument("--rerun", action="store_true", help="Re-run matching conservative sessions even if stored runs already exist.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -327,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
             return momentum_audit(config, args)
         if args.command == "conservative-report":
             return conservative_report(config, args)
+        if args.command == "validate-conservative":
+            return validate_conservative(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -507,39 +515,91 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
 
 
 def observe(config: AgentConfig, args) -> int:
-    cycles = _observe_cycles(args.duration_minutes, args.interval_seconds, args.cycles)
     successes = 0
     failures = 0
     store = SQLiteStore(config.database_path)
     started_at = datetime.now(timezone.utc)
+    started_mono = time.monotonic()
+    requested_cycles = args.cycles
+    requested_duration_seconds = (args.duration_minutes * 60.0) if args.duration_minutes is not None else None
+    if requested_cycles is None and requested_duration_seconds is None:
+        requested_cycles = 1
+    deadline_mono = (started_mono + requested_duration_seconds) if requested_duration_seconds is not None else None
     session_id = store.start_research_session(
         started_at,
         interval_seconds=args.interval_seconds,
-        cycles_requested=args.cycles if args.cycles is not None else cycles,
-        notes=f"duration_minutes={args.duration_minutes or 'none'}; interval_seconds={args.interval_seconds}",
+        cycles_requested=requested_cycles,
+        notes=(
+            f"duration_minutes={args.duration_minutes or 'none'}; interval_seconds={args.interval_seconds}; "
+            f"profile={getattr(args, 'profile', None) or 'default'}"
+        ),
     )
     print(f"Observe session started: {session_id}")
     interrupted = False
+    cycle_durations: list[float] = []
+    effective_intervals: list[float] = []
+    previous_cycle_start_mono: float | None = None
+    cycle_index = 0
     try:
-        for index in range(cycles):
-            print(f"Observe cycle {index + 1}/{cycles}")
+        while True:
+            now_mono = time.monotonic()
+            if requested_cycles is not None and cycle_index >= requested_cycles:
+                break
+            if cycle_index > 0 and deadline_mono is not None and now_mono >= deadline_mono:
+                break
+            if previous_cycle_start_mono is not None and args.interval_seconds > 0:
+                target_start = previous_cycle_start_mono + args.interval_seconds
+                if now_mono < target_start:
+                    time.sleep(target_start - now_mono)
+                    now_mono = time.monotonic()
+            cycle_started_mono = time.monotonic()
+            cycle_started_wall = datetime.now(timezone.utc)
+            cycle_label = f"{cycle_index + 1}" if requested_cycles is None else f"{cycle_index + 1}/{requested_cycles}"
+            print(f"Observe cycle {cycle_label}")
             try:
                 collect(config, session_id=session_id)
                 successes += 1
                 snapshot_count = len(store.raw_snapshot_rows(session_id=session_id))
-                print(f"Observe cycle {index + 1} complete. Session snapshots: {snapshot_count}; failures: {failures}.")
+                cycle_duration = time.monotonic() - cycle_started_mono
+                cycle_durations.append(cycle_duration)
+                effective_interval = (
+                    cycle_started_mono - previous_cycle_start_mono
+                    if previous_cycle_start_mono is not None
+                    else 0.0
+                )
+                if previous_cycle_start_mono is not None:
+                    effective_intervals.append(effective_interval)
+                print(
+                    f"Observe cycle {cycle_index + 1} complete. Session snapshots: {snapshot_count}; "
+                    f"failures: {failures}; cycle_duration={cycle_duration:.2f}s; "
+                    f"effective_interval={effective_interval:.2f}s."
+                )
             except HttpError as exc:
                 failures += 1
-                print(f"Observe cycle {index + 1} failed: {exc}", file=sys.stderr)
+                cycle_duration = time.monotonic() - cycle_started_mono
+                cycle_durations.append(cycle_duration)
+                effective_interval = (
+                    cycle_started_mono - previous_cycle_start_mono
+                    if previous_cycle_start_mono is not None
+                    else 0.0
+                )
+                if previous_cycle_start_mono is not None:
+                    effective_intervals.append(effective_interval)
+                print(f"Observe cycle {cycle_index + 1} failed: {exc}", file=sys.stderr)
                 print("Continuing observe loop. Use collect --demo for offline data.", file=sys.stderr)
+                print(
+                    f"Observe cycle {cycle_index + 1} failed after {cycle_duration:.2f}s; "
+                    f"effective_interval={effective_interval:.2f}s.",
+                    file=sys.stderr,
+                )
             store.update_research_session_progress(
                 session_id,
-                cycles_completed=index + 1,
+                cycles_completed=cycle_index + 1,
                 successful_cycles=successes,
                 failed_cycles=failures,
             )
-            if index < cycles - 1 and args.interval_seconds > 0:
-                time.sleep(args.interval_seconds)
+            previous_cycle_start_mono = cycle_started_mono
+            cycle_index += 1
     except KeyboardInterrupt:
         interrupted = True
         print("\nObserve interrupted. Finalizing partial session...")
@@ -547,6 +607,10 @@ def observe(config: AgentConfig, args) -> int:
         ended_at = datetime.now(timezone.utc)
         store.finish_research_session(session_id, ended_at)
         session = store.research_session_by_id(session_id)
+        summary = store.dataset_summary(source_filter="public", session_id=session_id)
+        markets = store.market_audit_rows(source_filter="public", session_id=session_id)
+        found = sum(1 for row in markets if row["accepted"])
+        orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
         store.close()
 
     print(f"Observe complete. Successful cycles: {successes}; failed cycles: {failures}.")
@@ -555,6 +619,21 @@ def observe(config: AgentConfig, args) -> int:
             f"Session summary: session_id={session_id} | cycles_completed={session['cycles_completed']} | "
             f"snapshots={session['snapshot_count']} | failed_snapshots={session['failed_snapshot_count']}"
         )
+    actual_duration = time.monotonic() - started_mono
+    avg_cycle = (sum(cycle_durations) / len(cycle_durations)) if cycle_durations else 0.0
+    min_cycle = min(cycle_durations, default=0.0)
+    max_cycle = max(cycle_durations, default=0.0)
+    cycles_per_hour = ((cycle_index / actual_duration) * 3600.0) if actual_duration > 0 else 0.0
+    print(
+        "Observe performance: "
+        f"requested_duration_seconds={requested_duration_seconds if requested_duration_seconds is not None else 'none'}; "
+        f"actual_duration_seconds={actual_duration:.2f}; cycles_completed={cycle_index}; "
+        f"avg_cycle_duration_seconds={avg_cycle:.2f}; min_cycle_duration_seconds={min_cycle:.2f}; "
+        f"max_cycle_duration_seconds={max_cycle:.2f}; effective_cycles_per_hour={cycles_per_hour:.2f}; "
+        f"successful_cycles={successes}; failed_cycles={failures}; "
+        f"snapshots_collected={summary['total_snapshots']}; failed_snapshots={summary['failed_snapshots']}; "
+        f"markets_found={found}; orderbooks_captured={orderbooks}"
+    )
     if interrupted:
         print(f"Analyze the partial session with: python -m src.main session-report --session-id {session_id}")
         return 0
@@ -606,12 +685,15 @@ def session_report(config: AgentConfig, args) -> int:
         found = sum(1 for row in markets if row["accepted"])
         orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
         assets = summary["assets_seen"]
+        session_notes = parse_config_notes(str(session["notes"] or ""))
         print("Research session report")
         print(f"Session ID: {session_id}")
         print(f"Started: {session['started_at']}")
         print(f"Ended: {session['ended_at'] or 'OPEN'}")
         print(f"Duration seconds: {session['duration_seconds'] or 0}")
         print(f"Interval seconds: {session['interval_seconds']}")
+        print(f"Observe profile: {session_notes.get('profile', 'default')}")
+        print(f"Requested duration minutes: {session_notes.get('duration_minutes', 'none')}")
         print(f"Cycles completed: {session['cycles_completed']}")
         print(f"Successful cycles: {session['successful_cycles']}")
         print(f"Failed cycles: {session['failed_cycles']}")
@@ -1018,6 +1100,7 @@ def export_data(config: AgentConfig, args) -> int:
             since=since,
             until=until,
             session_id=session_id,
+            validation=getattr(args, "validation", None),
         )
         print("Export complete.")
         for path in paths:
@@ -1269,94 +1352,64 @@ def conservative_report(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
     data_store = SQLiteStore(config.database_path)
     try:
-        sessions = [
-            row
-            for row in data_store.research_session_rows()
-            if data_store.dataset_summary(source_filter=source_filter, session_id=str(row["session_id"]))["total_snapshots"] > 0
-        ]
-        baseline_config = _replace_close_mode(
+        print(_build_conservative_report_text(data_store, config, source_filter))
+    finally:
+        data_store.close()
+    return 0
+
+
+def validate_conservative(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    rerun = bool(getattr(args, "rerun", False))
+    store = SQLiteStore(config.database_path)
+    try:
+        ready_sessions = []
+        for session in store.research_session_rows():
+            session_id = str(session["session_id"])
+            _, since, until = _session_bounds(store, session_id)
+            readiness_result = store.readiness(source_filter=source_filter, since=since, until=until, session_id=session_id)
+            if readiness_result["verdict"] == "READY_FOR_PUBLIC_REPLAY":
+                ready_sessions.append((session_id, since, until))
+        print("Conservative validation")
+        print(f"Source filter: {source_filter}")
+        print(f"Ready sessions found: {len(ready_sessions)}")
+        if not ready_sessions:
+            print("No replay-ready public sessions found.")
+            return 0
+        validation_config = _replace_close_mode(
             _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
             "approximate-expiry",
         )
-        session_payloads: list[dict] = []
-        variant_payloads: dict[str, list[dict]] = {
-            "BTC-only conservative": [],
-            "ETH-only conservative": [],
-            "BTC+ETH conservative": [],
-            "5m-only conservative": [],
-            "15m-only conservative": [],
-        }
-        for session in sessions:
-            session_id = str(session["session_id"])
-            baseline = _conservative_variant_summary(
-                baseline_config,
-                data_store=data_store,
+        for session_id, since, until in ready_sessions:
+            existing_run = None if rerun else _matching_conservative_run(store, session_id, source_filter)
+            if existing_run is not None:
+                print(f"{session_id} | reused_run_id={existing_run['run_id']} | realized_pnl={_fmt_money(existing_run['realized_pnl'])}")
+                continue
+            outcome = _simulate_replay(
+                validation_config,
                 source_filter=source_filter,
+                since=since,
+                until=until,
                 session_id=session_id,
-                label="conservative-tiny",
+                active_only=True,
+                min_seconds_to_expiry=validation_config.min_seconds_to_expiry,
+                max_seconds_to_expiry=validation_config.max_seconds_to_expiry,
+                now=datetime.now(timezone.utc),
+                data_store=store,
+                result_store=store,
+                mode="replay",
+                since_label=since.isoformat() if since else None,
             )
-            if baseline["ok"]:
-                session_payloads.append(baseline)
-            variant_specs = [
-                ("BTC-only conservative", {}),
-                ("ETH-only conservative", {"momentum_asset_filter": "ETH"}),
-                ("BTC+ETH conservative", {"momentum_asset_filter": None}),
-                ("5m-only conservative", {"momentum_duration_filter": "5m"}),
-                ("15m-only conservative", {"momentum_duration_filter": "15m"}),
-            ]
-            for label, overrides in variant_specs:
-                variant = _conservative_variant_summary(
-                    _replace_config_values(baseline_config, **overrides),
-                    data_store=data_store,
-                    source_filter=source_filter,
-                    session_id=session_id,
-                    label=label,
-                )
-                if variant["ok"]:
-                    variant_payloads[label].append(variant)
-        session_rows = [
-            ConservativeSessionRow(
-                session_id=payload["session_id"],
-                accepted_trades=payload["accepted"],
-                closed_trades=payload["report"].closed_trades,
-                realized_pnl=payload["report"].realized_pnl,
-                win_rate=payload["report"].win_rate,
-                expectancy=payload["report"].expectancy_per_trade,
-                max_drawdown=payload["report"].max_equity_drawdown,
-                max_exposure=payload["report"].max_position_exposure,
-                top_1_trade_pct=payload["report"].top_1_trade_pct_of_total_pnl,
-                pnl_excluding_top_1=payload["report"].pnl_excluding_top_1,
-                pnl_excluding_top_3=payload["report"].pnl_excluding_top_3,
-                settlement_unavailable=payload["report"].settlement_unavailable,
-                matched=payload["summary"]["matched"],
-                mismatched=payload["summary"]["mismatched"],
-                unknown=payload["summary"]["unknown"],
-                side_correctness_rate=payload["summary"]["correctness_rate"],
-                warnings=payload["report"].warnings,
-                verdicts=payload["paper_verdicts"],
+            if not outcome["ok"]:
+                print(f"{session_id} | failed={outcome['message']}")
+                continue
+            print(
+                f"{session_id} | created_run_id={outcome['run_id']} | accepted={outcome['accepted']} | "
+                f"skipped={outcome['skipped']} | closed={outcome['closed']}"
             )
-            for payload in session_payloads
-        ]
-        aggregate = aggregate_variant_row(label="conservative-tiny", session_rows=session_payloads)
-        variant_rows = [
-            aggregate_variant_row(label=label, session_rows=rows)
-            for label, rows in variant_payloads.items()
-            if rows
-        ]
-        print(
-            build_conservative_report(
-                source_filter=source_filter,
-                preset_summary=_conservative_preset_summary(baseline_config),
-                session_rows=session_rows,
-                aggregate_row=aggregate,
-                variant_rows=variant_rows,
-                by_asset=_aggregate_correctness_breakdowns(session_payloads, "by_asset"),
-                by_duration=_aggregate_correctness_breakdowns(session_payloads, "by_duration"),
-                by_side=_aggregate_correctness_breakdowns(session_payloads, "by_side"),
-            )
-        )
+        print(_build_conservative_report_text(store, config, source_filter))
     finally:
-        data_store.close()
+        store.close()
     return 0
 
 
@@ -2483,6 +2536,97 @@ def _conservative_variant_summary(
     return summary
 
 
+def _build_conservative_report_text(
+    data_store: SQLiteStore,
+    config: AgentConfig,
+    source_filter: str,
+) -> str:
+    sessions = [
+        row
+        for row in data_store.research_session_rows()
+        if data_store.dataset_summary(source_filter=source_filter, session_id=str(row["session_id"]))["total_snapshots"] > 0
+    ]
+    baseline_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+        "approximate-expiry",
+    )
+    session_payloads: list[dict] = []
+    variant_payloads: dict[str, list[dict]] = {
+        "BTC-only conservative": [],
+        "ETH-only conservative": [],
+        "BTC+ETH conservative": [],
+        "5m-only conservative": [],
+        "15m-only conservative": [],
+    }
+    for session in sessions:
+        session_id = str(session["session_id"])
+        baseline = _conservative_variant_summary(
+            baseline_config,
+            data_store=data_store,
+            source_filter=source_filter,
+            session_id=session_id,
+            label="conservative-tiny",
+        )
+        if baseline["ok"]:
+            session_payloads.append(baseline)
+        variant_specs = [
+            ("BTC-only conservative", {}),
+            ("ETH-only conservative", {"momentum_asset_filter": "ETH"}),
+            ("BTC+ETH conservative", {"momentum_asset_filter": None}),
+            ("5m-only conservative", {"momentum_duration_filter": "5m"}),
+            ("15m-only conservative", {"momentum_duration_filter": "15m"}),
+        ]
+        for label, overrides in variant_specs:
+            variant = _conservative_variant_summary(
+                _replace_config_values(baseline_config, **overrides),
+                data_store=data_store,
+                source_filter=source_filter,
+                session_id=session_id,
+                label=label,
+            )
+            if variant["ok"]:
+                variant_payloads[label].append(variant)
+    session_rows = [
+        ConservativeSessionRow(
+            session_id=payload["session_id"],
+            accepted_trades=payload["accepted"],
+            closed_trades=payload["report"].closed_trades,
+            realized_pnl=payload["report"].realized_pnl,
+            win_rate=payload["report"].win_rate,
+            expectancy=payload["report"].expectancy_per_trade,
+            max_drawdown=payload["report"].max_equity_drawdown,
+            max_exposure=payload["report"].max_position_exposure,
+            top_1_trade_pct=payload["report"].top_1_trade_pct_of_total_pnl,
+            pnl_excluding_top_1=payload["report"].pnl_excluding_top_1,
+            pnl_excluding_top_3=payload["report"].pnl_excluding_top_3,
+            settlement_unavailable=payload["report"].settlement_unavailable,
+            matched=payload["summary"]["matched"],
+            mismatched=payload["summary"]["mismatched"],
+            unknown=payload["summary"]["unknown"],
+            side_correctness_rate=payload["summary"]["correctness_rate"],
+            warnings=payload["report"].warnings,
+            verdicts=payload["paper_verdicts"],
+        )
+        for payload in session_payloads
+    ]
+    aggregate = aggregate_variant_row(label="conservative-tiny", session_rows=session_payloads)
+    variant_rows = [
+        aggregate_variant_row(label=label, session_rows=rows)
+        for label, rows in variant_payloads.items()
+        if rows
+    ]
+    return build_conservative_report(
+        source_filter=source_filter,
+        preset_summary=_conservative_preset_summary(baseline_config),
+        session_rows=session_rows,
+        aggregate_row=aggregate,
+        variant_rows=variant_rows,
+        by_asset=_aggregate_correctness_breakdowns(session_payloads, "by_asset"),
+        by_duration=_aggregate_correctness_breakdowns(session_payloads, "by_duration"),
+        by_side=_aggregate_correctness_breakdowns(session_payloads, "by_side"),
+    )
+
+
 def _aggregate_correctness_breakdowns(session_payloads: list[dict], key: str) -> dict[str, dict[str, float | int | None]]:
     merged: dict[str, dict[str, int]] = {}
     for payload in session_payloads:
@@ -2948,6 +3092,27 @@ def _conservative_preset_summary(config: AgentConfig) -> str:
         f"min_seconds_to_expiry={config.min_seconds_to_expiry if config.min_seconds_to_expiry is not None else 'none'} | "
         f"max_seconds_to_expiry={config.max_seconds_to_expiry if config.max_seconds_to_expiry is not None else 'none'}"
     )
+
+
+def _matching_conservative_run(store: SQLiteStore, session_id: str, source_filter: str) -> object | None:
+    rows = store.rows(
+        """
+        SELECT *
+        FROM runs
+        WHERE session_id = ? AND strategy = 'momentum' AND data_source = ?
+        ORDER BY started_at DESC, rowid DESC
+        """,
+        (session_id, source_filter),
+    )
+    for row in rows:
+        notes = parse_config_notes(str(row["notes"] or ""))
+        if (
+            notes.get("momentum_preset") == "conservative-tiny"
+            and notes.get("active_only") == "true"
+            and notes.get("close_mode") == "approximate-expiry"
+        ):
+            return row
+    return None
 
 
 def _effective_expiry_filters(config: AgentConfig, args) -> tuple[int | None, int | None]:

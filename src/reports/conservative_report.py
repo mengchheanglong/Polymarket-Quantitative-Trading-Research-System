@@ -96,6 +96,19 @@ def build_conservative_report(
 
     lines.append("Aggregate conservative result:")
     lines.append(_aggregate_line(aggregate_row))
+    profitable_sessions = sum(1 for row in session_rows if row.realized_pnl > 0)
+    losing_sessions = sum(1 for row in session_rows if row.realized_pnl < 0)
+    lines.append("Paper-readiness progress:")
+    lines.append(f"Closed trades progress: {aggregate_row.closed_trades}/50")
+    lines.append(f"Side correctness progress: {_fmt_pct(aggregate_row.side_correctness_rate)}/55.00%")
+    lines.append(f"PnL excluding top 3: {'positive' if (aggregate_row.pnl_excluding_top_3 or 0.0) > 0 else 'negative'}")
+    lines.append(
+        f"Top 1 contribution: {_fmt_pct(aggregate_row.top_1_trade_pct)} "
+        f"({'below' if aggregate_row.top_1_trade_pct is not None and aggregate_row.top_1_trade_pct < 0.40 else 'above'} 40%)"
+    )
+    lines.append(f"Sessions tested: {len(session_rows)}")
+    lines.append(f"Profitable sessions: {profitable_sessions}")
+    lines.append(f"Losing sessions: {losing_sessions}")
     lines.append("BTC/ETH and duration comparisons:")
     for row in variant_rows:
         lines.append(_aggregate_line(row))

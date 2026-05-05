@@ -95,4 +95,68 @@ def test_conservative_report_output_and_variants(tmp_path, capsys):
     assert "5m-only conservative" in output
     assert "15m-only conservative" in output
     assert "Side correctness by asset:" in output
+    assert "Closed trades progress:" in output
+    assert "Profitable sessions:" in output
     assert "Aggregate verdict:" in output
+
+
+def test_validate_conservative_reuses_existing_runs_and_can_rerun(tmp_path):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(["--db", str(db_path), "validate-conservative", "--source", "public"]) == 0
+    store = SQLiteStore(db_path)
+    try:
+        first_count = store.rows("SELECT COUNT(*) AS count FROM runs")[0]["count"]
+        assert first_count >= 1
+    finally:
+        store.close()
+
+    assert main(["--db", str(db_path), "validate-conservative", "--source", "public"]) == 0
+    store = SQLiteStore(db_path)
+    try:
+        second_count = store.rows("SELECT COUNT(*) AS count FROM runs")[0]["count"]
+        assert second_count == first_count
+    finally:
+        store.close()
+
+    assert main(["--db", str(db_path), "validate-conservative", "--source", "public", "--rerun"]) == 0
+    store = SQLiteStore(db_path)
+    try:
+        third_count = store.rows("SELECT COUNT(*) AS count FROM runs")[0]["count"]
+        assert third_count > second_count
+    finally:
+        store.close()
+
+
+def test_validation_export_package(tmp_path):
+    db_path = tmp_path / "paper.sqlite3"
+    out_dir = tmp_path / "exports"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(["--db", str(db_path), "validate-conservative", "--source", "public"]) == 0
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "export",
+            "--format",
+            "csv",
+            "--out",
+            str(out_dir),
+            "--validation",
+            "conservative",
+        ]
+    ) == 0
+
+    expected = {
+        "sessions.csv",
+        "raw_snapshots.csv",
+        "trades.csv",
+        "skipped_opportunities.csv",
+        "runs.csv",
+        "equity_snapshots.csv",
+        "signal_audit_summaries.csv",
+        "conservative_report_summary.csv",
+    }
+    assert expected.issubset({path.name for path in out_dir.glob("*.csv")})
