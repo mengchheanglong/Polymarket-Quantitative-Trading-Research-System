@@ -53,6 +53,7 @@ class AgentConfig:
     close_mode: str = "expiry-if-known"
     tiny_profile: bool = False
     momentum_preset: str | None = None
+    reverse_signal: bool = False
     momentum_side_filter: str | None = None
     momentum_asset_filter: str | None = None
     momentum_duration_filter: str | None = None
@@ -124,6 +125,7 @@ def load_config() -> AgentConfig:
         close_mode=os.environ.get("CLOSE_MODE", "expiry-if-known"),
         tiny_profile=parse_bool(os.environ.get("TINY_PROFILE"), default=False),
         momentum_preset=os.environ.get("MOMENTUM_PRESET") or None,
+        reverse_signal=parse_bool(os.environ.get("REVERSE_SIGNAL"), default=False),
         momentum_side_filter=os.environ.get("MOMENTUM_SIDE_FILTER") or None,
         momentum_asset_filter=os.environ.get("MOMENTUM_ASSET_FILTER") or None,
         momentum_duration_filter=os.environ.get("MOMENTUM_DURATION_FILTER") or None,

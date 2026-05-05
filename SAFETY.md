@@ -36,8 +36,10 @@ Phase 1 is paper-only by design.
 - `markov-report` and `stuck-markov` are paper-only analytics over stored market snapshots. They do not query authenticated APIs, do not place orders, and do not convert public observations into a live system.
 - `signal-audit`, `close-divergence`, and `momentum-audit` are paper-only audit commands. They replay stored snapshots or inspect stored runs only.
 - `conservative-tiny` is a paper-only preset. It narrows momentum research to a smaller, stricter subset of the stored public market windows, but it does not create any execution path.
+- `conservative-tiny-reverse` and `--reverse-signal` are paper-only research toggles. They flip the paper momentum side after the signal is computed, but they still use stored snapshots, paper balances, and paper-only close modes.
 - `conservative-report` is a paper-only validation command. It replays stored sessions with the conservative preset only, aggregates skepticism metrics such as top-trade concentration and side correctness, and never calls authenticated APIs.
 - `validate-conservative` is also paper-only. It may create additional stored replay runs, but only by replaying already-collected public snapshots inside SQLite. It still cannot place orders or touch authenticated APIs.
+- `side-audit`, `side-sweep`, and `candidate-ranking` are paper-only directional audit commands. They inspect stored conservative runs, compare normal vs reversed paper signals, and rank paper candidates without creating any execution path.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
 - Tiny momentum is not trusted just because mark-to-market looks positive. Phase 15 explicitly checks accepted-trade edge, side correctness at approximate expiry, and whether close-mode disagreement is large enough to invalidate the paper result.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.

@@ -29,6 +29,11 @@ from src.reports.diagnostics import build_diagnostics
 from src.reports.ledger import build_trade_ledger
 from src.reports.momentum_audit import build_momentum_audit_report
 from src.reports.config_view import parse_config_notes
+from src.reports.side_audit import (
+    build_candidate_ranking_report,
+    build_side_audit_report,
+    build_side_sweep_report,
+)
 from src.reports.settlement import build_settlement_report
 from src.reports.signal_audit import (
     build_signal_audit,
@@ -81,10 +86,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny"),
+        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse"),
         default=None,
         help="Apply a paper-only preset.",
     )
+    run_parser.add_argument("--reverse-signal", action="store_true", help="Paper-only research mode: flip momentum UP/DOWN entries.")
     run_parser.add_argument("--new-run", action="store_true", help="Start a fresh run. This is the default.")
     report_parser = subcommands.add_parser("report", help="Summarize fake trading results")
     report_parser.add_argument("--latest", action="store_true", help="Report only the latest run.")
@@ -111,10 +117,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
     replay_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny"),
+        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse"),
         default=None,
         help="Apply a paper-only preset.",
     )
+    replay_parser.add_argument("--reverse-signal", action="store_true", help="Paper-only research mode: flip momentum UP/DOWN entries.")
     replay_parser.add_argument(
         "--momentum-preset",
         choices=("balanced-tiny-momentum", "conservative-tiny-momentum"),
@@ -233,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
     signal_audit_parser = subcommands.add_parser("signal-audit", help="Audit accepted momentum signals for a run")
     signal_audit_parser.add_argument("--run-id", help="Inspect a specific run.")
     signal_audit_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
+    side_audit_parser = subcommands.add_parser("side-audit", help="Audit conservative momentum side correctness across stored sessions")
+    side_audit_parser.add_argument("--source", choices=("public", "all"), default="public")
+    side_audit_parser.add_argument("--session-id", help="Limit the audit to one research session.")
+    side_audit_parser.add_argument("--run-id", help="Inspect a specific stored run instead of the conservative aggregate.")
+    side_audit_parser.add_argument("--details", action="store_true", help="Print accepted-trade feature rows.")
     close_divergence_parser = subcommands.add_parser("close-divergence", help="Compare mark-to-market and approximate-expiry outcomes")
     close_divergence_parser.add_argument("--strategy", choices=("momentum",), default="momentum")
     close_divergence_parser.add_argument("--source", choices=("demo", "public", "all"), default=None)
@@ -252,6 +264,12 @@ def main(argv: list[str] | None = None) -> int:
     momentum_audit_parser.add_argument("--until", help="Only use stored snapshots at or before this UTC ISO timestamp.")
     momentum_audit_parser.add_argument("--session-id", help="Use the stored time window for a research session.")
     momentum_audit_parser.add_argument("--tiny", action="store_true")
+    side_sweep_parser = subcommands.add_parser("side-sweep", help="Compare conservative momentum side-selection variants")
+    side_sweep_parser.add_argument("--source", choices=("public", "all"), default="public")
+    side_sweep_parser.add_argument("--session-id", help="Limit the sweep to one research session.")
+    candidate_ranking_parser = subcommands.add_parser("candidate-ranking", help="Rank conservative momentum paper variants")
+    candidate_ranking_parser.add_argument("--source", choices=("public", "all"), default="public")
+    candidate_ranking_parser.add_argument("--session-id", help="Limit the ranking to one research session.")
     conservative_report_parser = subcommands.add_parser("conservative-report", help="Validate the conservative tiny momentum preset across stored sessions")
     conservative_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     validate_conservative_parser = subcommands.add_parser("validate-conservative", help="Create or reuse conservative momentum runs across replay-ready public sessions")
@@ -274,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _apply_named_preset(config, args.preset)
     if getattr(args, "momentum_preset", None):
         config = _apply_momentum_preset(config, args.momentum_preset)
+    if getattr(args, "reverse_signal", False):
+        config = _replace_config_values(config, reverse_signal=True)
 
     try:
         enforce_paper_only(config.dry_run, config.execution_mode)
@@ -327,10 +347,16 @@ def main(argv: list[str] | None = None) -> int:
             return settlement_report(config, args)
         if args.command == "signal-audit":
             return signal_audit(config, args)
+        if args.command == "side-audit":
+            return side_audit(config, args)
         if args.command == "close-divergence":
             return close_divergence(config, args)
         if args.command == "momentum-audit":
             return momentum_audit(config, args)
+        if args.command == "side-sweep":
+            return side_sweep(config, args)
+        if args.command == "candidate-ranking":
+            return candidate_ranking(config, args)
         if args.command == "conservative-report":
             return conservative_report(config, args)
         if args.command == "validate-conservative":
@@ -1228,6 +1254,73 @@ def signal_audit(config: AgentConfig, args) -> int:
     return 0
 
 
+def side_audit(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    store = SQLiteStore(config.database_path)
+    try:
+        selected_run_id = getattr(args, "run_id", None)
+        selected_session_id = getattr(args, "session_id", None)
+        if selected_run_id:
+            run = store.run_by_id(selected_run_id)
+            if run is None:
+                print("Run not found.")
+                return 1
+            _, rows = load_signal_audit_rows(store, selected_run_id)
+            summary = summarize_signal_audit_rows(rows)
+            report = build_report(store, config.starting_balance, run_id=selected_run_id)
+            print(
+                build_side_audit_report(
+                    source_filter=source_filter,
+                    ready_session_count=1,
+                    conservative_run_count=1,
+                    missing_session_ids=[],
+                    rows=rows,
+                    summary=summary,
+                    run_verdicts={selected_run_id: report.verdicts},
+                    details=bool(getattr(args, "details", False)),
+                )
+            )
+            return 0
+
+        ready_sessions = _ready_public_sessions(store, source_filter=source_filter, session_id=selected_session_id)
+        rows = []
+        missing_sessions: list[str] = []
+        matched_runs = 0
+        run_verdicts: dict[str, tuple[str, ...]] = {}
+        for session_id, _since, _until in ready_sessions:
+            run = _matching_momentum_run(
+                store,
+                session_id=session_id,
+                source_filter=source_filter,
+                preset="conservative-tiny",
+                reverse_signal=False,
+            )
+            if run is None:
+                missing_sessions.append(session_id)
+                continue
+            matched_runs += 1
+            current_run_id = str(run["run_id"])
+            _, run_rows = load_signal_audit_rows(store, current_run_id)
+            rows.extend(run_rows)
+            run_verdicts[current_run_id] = build_report(store, config.starting_balance, run_id=current_run_id).verdicts
+        summary = summarize_signal_audit_rows(rows)
+        print(
+            build_side_audit_report(
+                source_filter=source_filter,
+                ready_session_count=len(ready_sessions),
+                conservative_run_count=matched_runs,
+                missing_session_ids=missing_sessions,
+                rows=rows,
+                summary=summary,
+                run_verdicts=run_verdicts,
+                details=bool(getattr(args, "details", False)),
+            )
+        )
+    finally:
+        store.close()
+    return 0
+
+
 def close_divergence(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None))
     data_store = SQLiteStore(config.database_path)
@@ -1345,6 +1438,30 @@ def momentum_audit(config: AgentConfig, args) -> int:
         )
     finally:
         data_store.close()
+    return 0
+
+
+def side_sweep(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    store = SQLiteStore(config.database_path)
+    try:
+        session_scope = getattr(args, "session_id", None) or "all ready public sessions"
+        rows = _side_sweep_variant_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
+        print(build_side_sweep_report(source_filter=source_filter, session_scope=session_scope, rows=rows))
+    finally:
+        store.close()
+    return 0
+
+
+def candidate_ranking(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    store = SQLiteStore(config.database_path)
+    try:
+        session_scope = getattr(args, "session_id", None) or "all ready public sessions"
+        rows = _side_sweep_variant_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
+        print(build_candidate_ranking_report(source_filter=source_filter, session_scope=session_scope, rows=rows))
+    finally:
+        store.close()
     return 0
 
 
@@ -1569,6 +1686,8 @@ def _run_momentum(
     skipped = 0
     for market in markets:
         signal = _signal_for(strategy, candle_source, market.asset)
+        if config.reverse_signal:
+            signal = _reverse_signal(signal)
         filter_decision = _apply_momentum_filters(config, market, signal, now)
         if filter_decision is not None:
             engine.store.log_opportunity(now, filter_decision, run_id=engine.run_id)
@@ -1647,6 +1766,16 @@ def _market_duration_label(market: Market) -> str:
     if 14.0 <= minutes <= 16.0:
         return "15m"
     return "unknown"
+
+
+def _reverse_signal(signal: Signal) -> Signal:
+    return Signal(
+        asset=signal.asset,
+        direction=Direction.DOWN if signal.direction == Direction.UP else Direction.UP,
+        probability=signal.probability,
+        edge=signal.edge,
+        reason=f"{signal.reason}; reverse-signal",
+    )
 
 
 def _momentum_skip_decision(
@@ -1752,6 +1881,8 @@ def _run_replay_momentum(
             skipped += 1
             continue
         signal = _signal_for_at(strategy, data_store, market.asset, observed_at, source_filter, session_id)
+        if config.reverse_signal:
+            signal = _reverse_signal(signal)
         filter_decision = _apply_momentum_filters(config, market, signal, observed_at)
         if filter_decision is not None:
             engine.store.log_opportunity(observed_at, filter_decision, run_id=engine.run_id)
@@ -2430,10 +2561,13 @@ def _scratch_replay_summary(
             report = build_report(scratch, config.starting_balance, run_id=outcome["run_id"])
             run_row = scratch.run_by_id(outcome["run_id"])
             opportunity_map = {
-                (str(row["market_slug"]), str(row["direction"]), str(row["observed_at"])): float(row["edge"] or 0.0)
+                (str(row["market_slug"]), str(row["direction"]), str(row["observed_at"])): {
+                    "edge": float(row["edge"] or 0.0) if row["edge"] is not None else None,
+                    "spread": float(row["spread"]) if row["spread"] is not None else None,
+                }
                 for row in scratch.rows(
                     """
-                    SELECT market_slug, direction, observed_at, edge
+                    SELECT market_slug, direction, observed_at, edge, spread
                     FROM opportunities
                     WHERE run_id = ? AND decision = 'TRADE'
                     """,
@@ -2534,6 +2668,110 @@ def _conservative_variant_summary(
     )
     summary["drawdown_limit"] = config.session_loss_limit_usd
     return summary
+
+
+def _ready_public_sessions(
+    store: SQLiteStore,
+    *,
+    source_filter: str,
+    session_id: str | None = None,
+) -> list[tuple[str, datetime | None, datetime | None]]:
+    sessions: list[tuple[str, datetime | None, datetime | None]] = []
+    for session in store.research_session_rows():
+        current_session_id = str(session["session_id"])
+        if session_id and current_session_id != session_id:
+            continue
+        _, since, until = _session_bounds(store, current_session_id)
+        readiness_result = store.readiness(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
+        if readiness_result["verdict"] == "READY_FOR_PUBLIC_REPLAY":
+            sessions.append((current_session_id, since, until))
+    return sessions
+
+
+def _matching_momentum_run(
+    store: SQLiteStore,
+    *,
+    session_id: str,
+    source_filter: str,
+    preset: str,
+    reverse_signal: bool,
+) -> object | None:
+    rows = store.rows(
+        """
+        SELECT *
+        FROM runs
+        WHERE session_id = ? AND strategy = 'momentum' AND data_source = ?
+        ORDER BY started_at DESC, rowid DESC
+        """,
+        (session_id, source_filter),
+    )
+    for row in rows:
+        notes = parse_config_notes(str(row["notes"] or ""))
+        if (
+            notes.get("momentum_preset") == preset
+            and notes.get("reverse_signal", "false") == ("true" if reverse_signal else "false")
+            and notes.get("active_only") == "true"
+            and notes.get("close_mode") == "approximate-expiry"
+        ):
+            return row
+    return None
+
+
+def _side_sweep_variant_rows(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str,
+    session_id: str | None,
+) -> list[ConservativeAggregateRow]:
+    ready_sessions = _ready_public_sessions(store, source_filter=source_filter, session_id=session_id)
+    if not ready_sessions:
+        return []
+    baseline_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+        "approximate-expiry",
+    )
+    variant_rows: list[ConservativeAggregateRow] = []
+    for label, variant_config in _side_sweep_variants(baseline_config):
+        payloads = []
+        for current_session_id, _since, _until in ready_sessions:
+            payload = _conservative_variant_summary(
+                variant_config,
+                data_store=store,
+                source_filter=source_filter,
+                session_id=current_session_id,
+                label=label,
+            )
+            if payload["ok"]:
+                payloads.append(payload)
+        if payloads:
+            variant_rows.append(aggregate_variant_row(label=label, session_rows=payloads))
+    return variant_rows
+
+
+def _side_sweep_variants(config: AgentConfig) -> list[tuple[str, AgentConfig]]:
+    return [
+        ("normal conservative", config),
+        ("reverse conservative", _replace_config_values(config, momentum_preset="conservative-tiny-reverse", reverse_signal=True)),
+        ("higher-min-edge", _replace_config_values(config, min_edge=max(config.min_edge, 0.05))),
+        ("lower-max-spread", _replace_config_values(config, max_spread=min(config.max_spread, 0.01))),
+        ("entry-0.30-0.70", _replace_config_values(config, momentum_min_entry_price=0.30, momentum_max_entry_price=0.70)),
+        ("entry-0.40-0.75", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.75)),
+        ("entry-0.20-0.80", _replace_config_values(config, momentum_min_entry_price=0.20, momentum_max_entry_price=0.80)),
+        ("BTC-only", _replace_config_values(config, momentum_asset_filter="BTC", momentum_duration_filter=None)),
+        ("ETH-only", _replace_config_values(config, momentum_asset_filter="ETH", momentum_duration_filter=None)),
+        ("UP-only", _replace_config_values(config, momentum_side_filter="UP")),
+        ("DOWN-only", _replace_config_values(config, momentum_side_filter="DOWN")),
+        ("5m-only", _replace_config_values(config, momentum_asset_filter=None, momentum_duration_filter="5m")),
+        ("15m-only", _replace_config_values(config, momentum_asset_filter=None, momentum_duration_filter="15m")),
+        ("expiry-60-120", _replace_config_values(config, min_seconds_to_expiry=60, max_seconds_to_expiry=120)),
+        ("expiry-120-180", _replace_config_values(config, min_seconds_to_expiry=120, max_seconds_to_expiry=180)),
+    ]
 
 
 def _build_conservative_report_text(
@@ -3014,6 +3252,7 @@ def _config_notes(config: AgentConfig) -> str:
         f"stuck_min_seconds_to_expiry={config.stuck_min_seconds_to_expiry}; "
         f"stuck_max_seconds_to_expiry={config.stuck_max_seconds_to_expiry}; "
         f"momentum_preset={config.momentum_preset or 'none'}; "
+        f"reverse_signal={'true' if config.reverse_signal else 'false'}; "
         f"momentum_side_filter={config.momentum_side_filter or 'none'}; "
         f"momentum_asset_filter={config.momentum_asset_filter or 'none'}; "
         f"momentum_duration_filter={config.momentum_duration_filter or 'none'}; "
@@ -3044,6 +3283,7 @@ def _apply_named_preset(config: AgentConfig, preset: str) -> AgentConfig:
     mapping = {
         "balanced-tiny": "balanced-tiny-momentum",
         "conservative-tiny": "conservative-tiny-momentum",
+        "conservative-tiny-reverse": "conservative-tiny-reverse",
     }
     if preset in mapping:
         return _apply_momentum_preset(config, mapping[preset])
@@ -3074,12 +3314,20 @@ def _apply_momentum_preset(config: AgentConfig, preset: str) -> AgentConfig:
             min_seconds_to_expiry=60,
             max_seconds_to_expiry=180,
         )
+    if preset == "conservative-tiny-reverse":
+        conservative = _apply_momentum_preset(config, "conservative-tiny-momentum")
+        return _replace_config_values(
+            conservative,
+            momentum_preset="conservative-tiny-reverse",
+            reverse_signal=True,
+        )
     raise ValueError(f"unsupported momentum preset: {preset}")
 
 
 def _conservative_preset_summary(config: AgentConfig) -> str:
     return (
         f"momentum_preset={config.momentum_preset or 'none'} | "
+        f"reverse_signal={'true' if config.reverse_signal else 'false'} | "
         f"tiny_profile={'true' if config.tiny_profile else 'false'} | "
         f"momentum_asset_filter={config.momentum_asset_filter or 'none'} | "
         f"momentum_duration_filter={config.momentum_duration_filter or 'none'} | "
@@ -3108,6 +3356,7 @@ def _matching_conservative_run(store: SQLiteStore, session_id: str, source_filte
         notes = parse_config_notes(str(row["notes"] or ""))
         if (
             notes.get("momentum_preset") == "conservative-tiny"
+            and notes.get("reverse_signal", "false") != "true"
             and notes.get("active_only") == "true"
             and notes.get("close_mode") == "approximate-expiry"
         ):

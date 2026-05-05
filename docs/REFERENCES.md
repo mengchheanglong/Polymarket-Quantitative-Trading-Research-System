@@ -21,6 +21,7 @@ These are design references only. They do not authorize live trading, wallet sup
 
 - Useful for: dry-run discipline, backtesting concepts, strategy interfaces, run isolation, replay/reporting ergonomics, dataset export patterns, source filters, diagnostics, threshold-sweep workflows, long-running research-session workflows, conservative paper position accounting, active-window market filtering, tiny-position paper risk limits, and skeptical analysis of whether reported gains are concentrated in a few outsized trades.
 - Also useful for: defining stricter paper-readiness criteria for a promoted research preset without treating paper results as evidence of live tradability.
+- Also useful for: directional audit workflows where one paper branch is treated as a hypothesis to falsify, including reverse-signal tests, side-correctness breakdowns, and ranking stricter paper variants by skepticism metrics rather than just raw PnL.
 - Also useful for: long-running dry-run session ergonomics, including progress metrics, wall-clock bounded collection loops, and avoiding duplicate analysis runs when validating one strategy branch repeatedly.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
@@ -58,6 +59,7 @@ Useful ideas:
 - strategy-audit workflow ideas such as checking whether mark-to-market behavior survives a stricter expiry-based settlement approximation
 - conservative preset promotion ideas: narrower market filters, smaller paper exposure caps, and per-session validation before treating one strategy branch as the main research candidate
 - operational workflow ideas: collecting many short public sessions, then validating a conservative branch across them with explicit progress-to-readiness criteria instead of trusting one attractive session
+- directional audit ideas: comparing the normal paper signal against a reversed version, then checking whether side correctness, expectancy, and PnL excluding top trades improve under stricter paper-only filters
 
 Do not copy yet:
 - live execution
@@ -70,6 +72,7 @@ Relevant future phases:
 - Phase 14+: strategy signal design
 - Phase 15+: monitoring/reporting and strategy-audit workflow
 - Phase 16+: conservative preset validation, multi-session side-correctness review, and paper-readiness criteria
+- Phase 18+: reverse-signal research, side-correctness deep audit, and paper candidate ranking without adding any execution path
 - Phase 17+: live-executor design review, separate from paper engine
 
 Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

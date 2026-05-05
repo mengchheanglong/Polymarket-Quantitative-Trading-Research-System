@@ -172,10 +172,15 @@ python -m src.main close-mode-compare --strategy stuck-markov --source public --
 python -m src.main settlement-report --run-id <run_id>
 python -m src.main markov-report --source public --session-id <session_id>
 python -m src.main signal-audit --run-id <run_id>
+python -m src.main side-audit --source public
+python -m src.main side-audit --source public --details
 python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --active-only --tiny
 python -m src.main momentum-audit --source public --session-id <session_id> --tiny
 python -m src.main conservative-report --source public
 python -m src.main validate-conservative --source public
+python -m src.main replay --strategy momentum --preset conservative-tiny-reverse --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main side-sweep --source public
+python -m src.main candidate-ranking --source public
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -267,6 +272,10 @@ Public discovery process:
 - `conservative-tiny` is the current main momentum research preset. It keeps the paper engine in tiny mode, prefers BTC 5-minute markets, tightens the edge/spread window, blocks very low and very high entries, and caps total paper exposure at `$5.00`.
 - `conservative-report` replays that preset across all stored public sessions using stored snapshots only, then reports side correctness, top-trade concentration, PnL excluding top trades, BTC-vs-ETH comparisons, 5m-vs-15m comparisons, and paper-readiness verdicts.
 - `validate-conservative` is the session runner for that report. It finds replay-ready public sessions, reuses matching conservative runs if they already exist, creates missing ones, and prints updated paper-readiness progress.
+- `side-audit` is the directional deep-dive for that conservative branch. It summarizes matched vs mismatched approximate-expiry outcomes across stored conservative runs and can print a full accepted-trade feature table with entry price, spread, edge, entry/expiry exchange prices, pre/post entry exchange moves, and mismatch lag flags.
+- `conservative-tiny-reverse` and `--reverse-signal` are paper-only research tools. They use the same tiny risk controls and entry filters, but flip `UP` to `DOWN` and `DOWN` to `UP` so the repo can test whether the conservative momentum side is backward.
+- `side-sweep` compares the normal conservative branch, the reverse branch, and tighter filtered variants such as higher edge, lower spread, narrower entry-price bands, asset filters, side filters, duration filters, and tighter expiry windows.
+- `candidate-ranking` ranks those paper candidates by side correctness, expectancy, closed trades, PnL excluding top trades, concentration, drawdown, exposure, and verdicts.
 - `close-divergence` compares trade-level outcomes between `mark-to-market` and `approximate-expiry` on the same stored session.
 - `momentum-audit` runs paper-only filter experiments such as `UP` only, `DOWN` only, `BTC` only, `ETH` only, `5m` only, `15m` only, tighter expiry windows, and the `balanced-tiny-momentum` / `conservative-tiny-momentum` research presets.
 - Tiny momentum remains under audit. Positive mark-to-market output is not enough if approximate-expiry is weak or directionally wrong.

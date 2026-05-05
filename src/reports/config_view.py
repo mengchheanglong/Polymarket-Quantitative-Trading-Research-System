@@ -31,6 +31,7 @@ _CONFIG_LABELS = (
     ("stuck_max_seconds_to_expiry", "stuck_max_seconds_to_expiry"),
     ("tiny_profile", "tiny_profile"),
     ("momentum_preset", "momentum_preset"),
+    ("reverse_signal", "reverse_signal"),
     ("momentum_side_filter", "momentum_side_filter"),
     ("momentum_asset_filter", "momentum_asset_filter"),
     ("momentum_duration_filter", "momentum_duration_filter"),

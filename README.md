@@ -308,6 +308,22 @@ python -m src.main export --format csv --out exports --validation conservative
 
 `validate-conservative` scans replay-ready public sessions, reuses matching stored conservative runs when they already exist, re-runs them only with `--rerun`, and then prints the aggregate conservative report. This is the safest way to track progress toward paper-readiness without mixing baseline momentum runs back into the main research candidate.
 
+Phase 18 keeps that conservative branch paper-only and shifts the work to directional validation:
+
+```bash
+python -m src.main side-audit --source public
+python -m src.main side-audit --source public --details
+python -m src.main replay --strategy momentum --preset conservative-tiny-reverse --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main side-sweep --source public
+python -m src.main candidate-ranking --source public
+```
+
+The key question is no longer whether one small paper run made money. The key question is whether the chosen side was correct often enough to support the thesis. `side-audit` summarizes matched vs mismatched trades across the conservative preset, breaks correctness down by asset, side, duration, entry-price bucket, seconds-to-expiry bucket, edge bucket, spread bucket, and underlying exchange movement, and can print a full accepted-trade feature table with approximate-expiry outcomes.
+
+`conservative-tiny-reverse` and `--reverse-signal` are research-only. They keep the same paper filters and risk caps, but flip `UP` to `DOWN` and `DOWN` to `UP` so the repo can test whether the conservative momentum side is backward. `side-sweep` compares the normal conservative branch, the reverse branch, and tighter filtered variants such as higher edge, lower spread, narrower entry-price bands, asset filters, side filters, duration filters, and tighter expiry windows. `candidate-ranking` then ranks those paper candidates by side correctness, expectancy, closed trades, PnL excluding top trades, concentration, drawdown, exposure, and verdicts.
+
+This is still not proof of live profitability. Reverse-signal tests, side-correctness audits, and candidate rankings are all built from stored public snapshots and approximate paper settlement logic only.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.
