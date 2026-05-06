@@ -621,6 +621,10 @@ def observe(config: AgentConfig, args) -> int:
     effective_intervals: list[float] = []
     previous_cycle_start_mono: float | None = None
     cycle_index = 0
+    summary = {"total_snapshots": "n/a", "failed_snapshots": "n/a"}
+    found: int | str = "n/a"
+    orderbooks: int | str = "n/a"
+    summary_error: str | None = None
     try:
         while True:
             now_mono = time.monotonic()
@@ -688,10 +692,17 @@ def observe(config: AgentConfig, args) -> int:
         ended_at = datetime.now(timezone.utc)
         store.finish_research_session(session_id, ended_at)
         session = store.research_session_by_id(session_id)
-        summary = store.dataset_summary(source_filter="public", session_id=session_id)
-        markets = store.market_audit_rows(source_filter="public", session_id=session_id)
-        found = sum(1 for row in markets if row["accepted"])
-        orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
+        summary_error = None
+        try:
+            summary = store.dataset_summary(source_filter="public", session_id=session_id)
+            markets = store.market_audit_rows(source_filter="public", session_id=session_id)
+            found = sum(1 for row in markets if row["accepted"])
+            orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
+        except Exception as exc:
+            summary = {"total_snapshots": "n/a", "failed_snapshots": "n/a"}
+            found = "n/a"
+            orderbooks = "n/a"
+            summary_error = str(exc)
         store.close()
 
     print(f"Observe complete. Successful cycles: {successes}; failed cycles: {failures}.")
@@ -715,6 +726,10 @@ def observe(config: AgentConfig, args) -> int:
         f"snapshots_collected={summary['total_snapshots']}; failed_snapshots={summary['failed_snapshots']}; "
         f"markets_found={found}; orderbooks_captured={orderbooks}"
     )
+    if summary_error is not None:
+        print(
+            f"Observe summary warning: session_id={session_id}; summary calculation failed after finalization: {summary_error}"
+        )
     if interrupted:
         print(f"Analyze the partial session with: python -m src.main session-report --session-id {session_id}")
         return 0
@@ -759,7 +774,16 @@ def session_report(config: AgentConfig, args) -> int:
             print("No matching session found.")
             return 1
         session_id, since, until = _session_bounds(store, str(session["session_id"]))
-        summary = store.dataset_summary(source_filter="public", since=since, until=until, session_id=session_id)
+        try:
+            summary = store.dataset_summary(source_filter="public", since=since, until=until, session_id=session_id)
+        except Exception as exc:
+            print("Research session report")
+            print(f"Session ID: {session_id}")
+            print(f"Started: {session['started_at']}")
+            print(f"Ended: {session['ended_at'] or 'OPEN'}")
+            print("Summary error: " + str(exc))
+            print("Stored session metadata was preserved. Retry after fixing the dataset summary path.")
+            return 1
         quality = store.data_quality_metrics(source_filter="public", since=since, until=until, session_id=session_id)
         readiness_result = store.readiness(source_filter="public", since=since, until=until, session_id=session_id)
         markets = store.market_audit_rows(source_filter="public", since=since, until=until, session_id=session_id)

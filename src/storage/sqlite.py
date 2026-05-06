@@ -1244,22 +1244,12 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> list[sqlite3.Row]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        source_clause, source_params = _source_sql("source_name", source_filter)
-        if source_clause:
-            clauses.append(source_clause)
-            params.extend(source_params)
-        if session_id is not None:
-            clauses.append("session_id = ?")
-            params.append(session_id)
-        if since is not None:
-            clauses.append("observed_at >= ?")
-            params.append(_iso(since))
-        if until is not None:
-            clauses.append("observed_at <= ?")
-            params.append(_iso(until))
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._raw_snapshot_where(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
         return self.rows(f"SELECT * FROM raw_snapshots {where} ORDER BY observed_at, id", tuple(params))
 
     def discovered_market_rows(
@@ -1297,45 +1287,72 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        rows = self.raw_snapshot_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
-        first = rows[0]["observed_at"] if rows else "n/a"
-        latest = rows[-1]["observed_at"] if rows else "n/a"
-        filtered_ids = [int(row["id"]) for row in rows]
-        id_filter, id_params = _id_filter(filtered_ids)
+        where, params = self._raw_snapshot_where(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
+        count_row = self.row(
+            f"""
+            SELECT
+                COUNT(*) AS total_snapshots,
+                MIN(observed_at) AS first_snapshot,
+                MAX(observed_at) AS latest_snapshot,
+                SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END) AS failed_snapshots
+            FROM raw_snapshots
+            {where}
+            """,
+            tuple(params),
+        )
+        total_snapshots = int(count_row["total_snapshots"] or 0) if count_row is not None else 0
+        first = str(count_row["first_snapshot"]) if count_row and count_row["first_snapshot"] is not None else "n/a"
+        latest = str(count_row["latest_snapshot"]) if count_row and count_row["latest_snapshot"] is not None else "n/a"
+        failed = int(count_row["failed_snapshots"] or 0) if count_row is not None else 0
         type_counts = {
             str(row["snapshot_type"]): int(row["count"])
             for row in self.rows(
                 f"""
                 SELECT snapshot_type, COUNT(*) AS count
                 FROM raw_snapshots
-                {id_filter}
+                {where}
                 GROUP BY snapshot_type
                 ORDER BY snapshot_type
                 """,
-                id_params,
+                tuple(params),
             )
         }
-        failed = sum(1 for row in rows if row["status"] != "ok")
         assets = [
             str(row["asset"])
             for row in self.rows(
                 f"""
                 SELECT DISTINCT asset
                 FROM raw_snapshots
-                {id_filter}
-                {'AND' if id_filter else 'WHERE'} asset IS NOT NULL
+                {where}
+                {'AND' if where else 'WHERE'} asset IS NOT NULL
                 ORDER BY asset
                 """,
-                id_params,
+                tuple(params),
             )
         ]
         market_rows = self._visible_market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         quality = self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)
-        actual_sources = {str(row["source_name"]) for row in rows}
+        actual_sources = {
+            str(row["source_name"])
+            for row in self.rows(
+                f"""
+                SELECT DISTINCT source_name
+                FROM raw_snapshots
+                {where}
+                ORDER BY source_name
+                """,
+                tuple(params),
+            )
+        }
         return {
             "source_filter": source_filter or "all",
             "session_id": session_id or "none",
-            "total_snapshots": len(rows),
+            "total_snapshots": total_snapshots,
             "exchange_price_snapshots": type_counts.get("exchange_price", 0),
             "market_snapshots": type_counts.get("market_metadata", 0),
             "orderbook_snapshots": type_counts.get("orderbook", 0),
@@ -1355,6 +1372,32 @@ class SQLiteStore:
             "demo_included": any(_is_demo_source(source) for source in actual_sources),
             "public_included": any(not _is_demo_source(source) for source in actual_sources),
         }
+
+    def _raw_snapshot_where(
+        self,
+        *,
+        source_filter: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        session_id: str | None,
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
 
     def data_quality_metrics(
         self,
@@ -1765,6 +1808,9 @@ class SQLiteStore:
 
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return list(self.conn.execute(query, params))
+
+    def row(self, query: str, params: tuple[Any, ...] = ()) -> sqlite3.Row | None:
+        return self.conn.execute(query, params).fetchone()
 
 
 def _iso(value: datetime) -> str:
