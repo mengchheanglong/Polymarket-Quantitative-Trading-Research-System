@@ -180,7 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     observe_parser.add_argument("--duration-minutes", type=float, default=None, help="Maximum observe duration.")
     observe_parser.add_argument("--interval-seconds", type=float, default=15.0, help="Seconds between cycles.")
     observe_parser.add_argument("--cycles", type=int, default=None, help="Maximum cycles, useful for tests.")
-    observe_parser.add_argument("--profile", choices=("conservative-momentum",), default=None, help="Label a public-data collection profile.")
+    observe_parser.add_argument(
+        "--profile",
+        choices=("conservative-momentum", "conservative-entry-30-70"),
+        default=None,
+        help="Label and optionally narrow a public-data collection profile.",
+    )
     subcommands.add_parser("sessions", help="List public-data research sessions")
     session_report_parser = subcommands.add_parser("session-report", help="Summarize a research observation session")
     session_report_parser.add_argument("--session-id", help="Show a specific session.")
@@ -341,6 +346,8 @@ def main(argv: list[str] | None = None) -> int:
         config = _apply_momentum_preset(config, args.momentum_preset)
     if getattr(args, "reverse_signal", False):
         config = _replace_config_values(config, reverse_signal=True)
+    if getattr(args, "profile", None):
+        config = _replace_config_values(config, observe_profile=args.profile)
 
     try:
         enforce_paper_only(config.dry_run, config.execution_mode)
@@ -480,6 +487,7 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
             print(f"Inserted mock orderbooks: {len(orderbooks)}")
             return 0
 
+        profile = _observe_profile_settings(config.observe_profile)
         exchange = FallbackExchangeCollector(
             [
                 CoinbaseCollector(config.coinbase_base_url),
@@ -487,7 +495,7 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
             ]
         )
         try:
-            prices = exchange.collect_prices()
+            prices = _collect_public_prices(exchange, profile["assets"])
         except Exception as exc:
             store.log_raw_snapshot(
                 now,
@@ -537,7 +545,8 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
         polymarket = PolymarketPublicCollector(config.gamma_base_url, config.clob_base_url)
         try:
             candidates = polymarket.discover_market_candidates(
-                max_duration_minutes=config.max_market_duration_minutes,
+                asset_filter=profile["asset_filter"],
+                max_duration_minutes=profile["max_market_duration_minutes"],
             )
             candidates, orderbooks = polymarket.capture_orderbooks(candidates)
         except Exception as exc:
@@ -3297,6 +3306,28 @@ def _log_discovery_raw_snapshots(
 def _signal_for(strategy: MomentumUpDownStrategy, candle_source, asset: Asset) -> Signal:
     candles = candle_source.recent_candles(asset)
     return strategy.signal(asset, candles)
+
+
+def _observe_profile_settings(profile: str | None) -> dict[str, object]:
+    if profile == "conservative-entry-30-70":
+        return {
+            "assets": (Asset.BTC,),
+            "asset_filter": Asset.BTC,
+            "max_market_duration_minutes": 5,
+        }
+    return {
+        "assets": (Asset.BTC, Asset.ETH),
+        "asset_filter": None,
+        "max_market_duration_minutes": 60,
+    }
+
+
+def _collect_public_prices(exchange, assets: tuple[Asset, ...]) -> list[PriceSnapshot]:
+    if hasattr(exchange, "latest_price"):
+        return [exchange.latest_price(asset) for asset in assets]
+    collected = exchange.collect_prices()
+    wanted = {asset.value for asset in assets}
+    return [snapshot for snapshot in collected if snapshot.asset.value in wanted]
 
 
 def _signal_for_at(

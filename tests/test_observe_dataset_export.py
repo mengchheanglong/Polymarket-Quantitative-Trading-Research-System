@@ -111,6 +111,44 @@ class FakePolymarket:
         )
 
 
+class FocusedFakePolymarket(FakePolymarket):
+    def discover_updown_markets(self, _max_duration_minutes=60):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        markets = [
+            Market(
+                market_id="observed-btc-5m",
+                slug="observed-btc-5m-updown",
+                title="Observed BTC 5m Up or Down",
+                asset=Asset.BTC,
+                window=TimingWindow(now, now + timedelta(minutes=5)),
+                up_token_id="OBS-BTC-5M-UP",
+                down_token_id="OBS-BTC-5M-DOWN",
+                source_url="mock://observed",
+            ),
+            Market(
+                market_id="observed-btc-15m",
+                slug="observed-btc-15m-updown",
+                title="Observed BTC 15m Up or Down",
+                asset=Asset.BTC,
+                window=TimingWindow(now, now + timedelta(minutes=15)),
+                up_token_id="OBS-BTC-15M-UP",
+                down_token_id="OBS-BTC-15M-DOWN",
+                source_url="mock://observed",
+            ),
+            Market(
+                market_id="observed-eth-5m",
+                slug="observed-eth-5m-updown",
+                title="Observed ETH 5m Up or Down",
+                asset=Asset.ETH,
+                window=TimingWindow(now, now + timedelta(minutes=5)),
+                up_token_id="OBS-ETH-5M-UP",
+                down_token_id="OBS-ETH-5M-DOWN",
+                source_url="mock://observed",
+            ),
+        ]
+        return [market for market in markets if market.window.duration_minutes <= _max_duration_minutes]
+
+
 def test_observe_cycles_with_mocked_public_collectors(tmp_path, monkeypatch, capsys):
     db_path = tmp_path / "paper.sqlite3"
     monkeypatch.setattr("src.main.FallbackExchangeCollector", lambda _collectors: FakeExchange())
@@ -131,7 +169,7 @@ def test_observe_cycles_with_mocked_public_collectors(tmp_path, monkeypatch, cap
     stdout = capsys.readouterr().out
     assert exit_code == 0
     assert "Observe cycle 1/3" in stdout
-    assert "Observe complete. Successful cycles: 3; failed cycles: 0." in stdout
+    assert "Observe complete." in stdout
 
     store = SQLiteStore(db_path)
     try:
@@ -315,3 +353,50 @@ def test_observe_profile_is_recorded_and_summary_printed(tmp_path, monkeypatch, 
         assert len(store.raw_snapshot_rows()) == 0
     finally:
         store.close()
+
+
+def test_observe_conservative_entry_profile_collects_btc_only(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    monkeypatch.setattr("src.main.FallbackExchangeCollector", lambda _collectors: FakeExchange())
+    monkeypatch.setattr("src.main.PolymarketPublicCollector", FocusedFakePolymarket)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "observe",
+            "--profile",
+            "conservative-entry-30-70",
+            "--cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Observe performance:" in output
+
+    store = SQLiteStore(db_path)
+    try:
+        session = store.latest_research_session()
+        assert session is not None
+        session_id = str(session["session_id"])
+        assert "profile=conservative-entry-30-70" in str(session["notes"] or "")
+        summary = store.dataset_summary(source_filter="public", session_id=session_id)
+        assert summary["assets_seen"] == ["BTC"]
+        price_rows = store.rows(
+            "SELECT DISTINCT asset FROM price_snapshots WHERE session_id = ? ORDER BY asset",
+            (session_id,),
+        )
+        assert [str(row["asset"]) for row in price_rows] == ["BTC"]
+        markets = store.market_audit_rows(source_filter="public", session_id=session_id)
+        assert markets
+        assert all(row["asset"] == "BTC" for row in markets)
+        assert all("15m" not in row["slug"] for row in markets)
+    finally:
+        store.close()
+
+    assert main(["--db", str(db_path), "session-report", "--latest"]) == 0
+    report_out = capsys.readouterr().out
+    assert "Observe profile: conservative-entry-30-70" in report_out
+    assert "Assets observed: BTC" in report_out

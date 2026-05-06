@@ -59,6 +59,7 @@ class AgentConfig:
     momentum_duration_filter: str | None = None
     momentum_min_entry_price: float | None = None
     momentum_max_entry_price: float | None = None
+    observe_profile: str | None = None
     random_seed: int = 7
     gamma_base_url: str = "https://gamma-api.polymarket.com"
     clob_base_url: str = "https://clob.polymarket.com"
@@ -135,6 +136,7 @@ def load_config() -> AgentConfig:
         momentum_max_entry_price=float(os.environ["MOMENTUM_MAX_ENTRY_PRICE"])
         if os.environ.get("MOMENTUM_MAX_ENTRY_PRICE")
         else None,
+        observe_profile=os.environ.get("OBSERVE_PROFILE") or None,
         random_seed=int(os.environ.get("RANDOM_SEED", "7")),
         gamma_base_url=os.environ.get("GAMMA_BASE_URL", "https://gamma-api.polymarket.com"),
         clob_base_url=os.environ.get("CLOB_BASE_URL", "https://clob.polymarket.com"),
