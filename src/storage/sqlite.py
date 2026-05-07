@@ -232,6 +232,58 @@ CREATE TABLE IF NOT EXISTS research_sessions (
     failed_snapshot_count INTEGER DEFAULT 0,
     notes TEXT
 );
+CREATE TABLE IF NOT EXISTS candidate_session_summaries (
+    candidate_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_filter TEXT NOT NULL,
+    config_fingerprint TEXT NOT NULL,
+    accepted_trades INTEGER NOT NULL,
+    closed_trades INTEGER NOT NULL,
+    realized_pnl REAL NOT NULL,
+    win_rate REAL NOT NULL,
+    expectancy REAL,
+    max_drawdown REAL NOT NULL,
+    max_exposure REAL NOT NULL,
+    top_1_trade_pct REAL,
+    pnl_excluding_top_1 REAL,
+    pnl_excluding_top_3 REAL,
+    settlement_unavailable INTEGER NOT NULL,
+    matched INTEGER NOT NULL,
+    mismatched INTEGER NOT NULL,
+    unknown INTEGER NOT NULL,
+    side_correctness_rate REAL,
+    warnings_json TEXT NOT NULL,
+    verdicts_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_name, session_id, source_filter, config_fingerprint)
+);
+CREATE TABLE IF NOT EXISTS candidate_aggregate_summaries (
+    candidate_name TEXT NOT NULL,
+    source_filter TEXT NOT NULL,
+    config_fingerprint TEXT NOT NULL,
+    sessions_tested INTEGER NOT NULL,
+    accepted_trades INTEGER NOT NULL,
+    closed_trades INTEGER NOT NULL,
+    realized_pnl REAL NOT NULL,
+    win_rate REAL NOT NULL,
+    expectancy REAL,
+    max_drawdown REAL NOT NULL,
+    max_exposure REAL NOT NULL,
+    top_1_trade_pct REAL,
+    pnl_excluding_top_1 REAL,
+    pnl_excluding_top_3 REAL,
+    settlement_unavailable INTEGER NOT NULL,
+    matched INTEGER NOT NULL,
+    mismatched INTEGER NOT NULL,
+    unknown INTEGER NOT NULL,
+    side_correctness_rate REAL,
+    aggregate_verdict_json TEXT NOT NULL,
+    paper_readiness_progress_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_name, source_filter, config_fingerprint)
+);
 CREATE INDEX IF NOT EXISTS idx_price_snapshots_asset_session_observed
     ON price_snapshots (asset, session_id, observed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_price_snapshots_source_observed
@@ -252,10 +304,32 @@ CREATE INDEX IF NOT EXISTS idx_raw_snapshots_session_observed
     ON raw_snapshots (session_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_raw_snapshots_source_type_observed
     ON raw_snapshots (source_name, snapshot_type, observed_at);
+CREATE INDEX IF NOT EXISTS idx_raw_snapshots_session_source_type_time
+    ON raw_snapshots (session_id, source_name, snapshot_type, observed_at);
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_observed
     ON discovered_markets (session_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_source_observed
     ON discovered_markets (source_name, observed_at);
+CREATE INDEX IF NOT EXISTS idx_runs_strategy_source_session_notes
+    ON runs (strategy, data_source, session_id, notes);
+CREATE INDEX IF NOT EXISTS idx_runs_session_strategy_source_started
+    ON runs (session_id, strategy, data_source, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_run_status
+    ON trades (run_id, status);
+CREATE INDEX IF NOT EXISTS idx_opportunities_run_reason
+    ON opportunities (run_id, reason);
+CREATE INDEX IF NOT EXISTS idx_opportunities_run_decision
+    ON opportunities (run_id, decision);
+CREATE INDEX IF NOT EXISTS idx_sessions_started
+    ON research_sessions (started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_notes_started
+    ON research_sessions (notes, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidate_session_summaries_lookup
+    ON candidate_session_summaries (candidate_name, source_filter, config_fingerprint, session_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_session_summaries_run
+    ON candidate_session_summaries (run_id);
+CREATE INDEX IF NOT EXISTS idx_candidate_aggregate_summaries_lookup
+    ON candidate_aggregate_summaries (candidate_name, source_filter, config_fingerprint);
 """
 
 
@@ -661,6 +735,191 @@ class SQLiteStore:
     def latest_run_id(self) -> str | None:
         row = self.latest_run()
         return str(row["run_id"]) if row else None
+
+    def candidate_session_summary(
+        self,
+        *,
+        candidate_name: str,
+        session_id: str,
+        source_filter: str,
+        config_fingerprint: str,
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM candidate_session_summaries
+            WHERE candidate_name = ? AND session_id = ? AND source_filter = ? AND config_fingerprint = ?
+            """,
+            (candidate_name, session_id, source_filter, config_fingerprint),
+        ).fetchone()
+
+    def candidate_session_summary_rows(
+        self,
+        *,
+        candidate_name: str,
+        source_filter: str,
+        config_fingerprint: str | None = None,
+    ) -> list[sqlite3.Row]:
+        if config_fingerprint is None:
+            return self.rows(
+                """
+                SELECT *
+                FROM candidate_session_summaries
+                WHERE candidate_name = ? AND source_filter = ?
+                ORDER BY updated_at, session_id
+                """,
+                (candidate_name, source_filter),
+            )
+        return self.rows(
+            """
+            SELECT *
+            FROM candidate_session_summaries
+            WHERE candidate_name = ? AND source_filter = ? AND config_fingerprint = ?
+            ORDER BY updated_at, session_id
+            """,
+            (candidate_name, source_filter, config_fingerprint),
+        )
+
+    def upsert_candidate_session_summary(self, values: dict[str, Any], now: datetime) -> None:
+        created_at = values.get("created_at") or _iso(now)
+        updated_at = _iso(now)
+        self.conn.execute(
+            """
+            INSERT INTO candidate_session_summaries (
+                candidate_name, session_id, run_id, source_filter, config_fingerprint,
+                accepted_trades, closed_trades, realized_pnl, win_rate, expectancy,
+                max_drawdown, max_exposure, top_1_trade_pct, pnl_excluding_top_1,
+                pnl_excluding_top_3, settlement_unavailable, matched, mismatched, unknown,
+                side_correctness_rate, warnings_json, verdicts_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_name, session_id, source_filter, config_fingerprint)
+            DO UPDATE SET
+                run_id = excluded.run_id,
+                accepted_trades = excluded.accepted_trades,
+                closed_trades = excluded.closed_trades,
+                realized_pnl = excluded.realized_pnl,
+                win_rate = excluded.win_rate,
+                expectancy = excluded.expectancy,
+                max_drawdown = excluded.max_drawdown,
+                max_exposure = excluded.max_exposure,
+                top_1_trade_pct = excluded.top_1_trade_pct,
+                pnl_excluding_top_1 = excluded.pnl_excluding_top_1,
+                pnl_excluding_top_3 = excluded.pnl_excluding_top_3,
+                settlement_unavailable = excluded.settlement_unavailable,
+                matched = excluded.matched,
+                mismatched = excluded.mismatched,
+                unknown = excluded.unknown,
+                side_correctness_rate = excluded.side_correctness_rate,
+                warnings_json = excluded.warnings_json,
+                verdicts_json = excluded.verdicts_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                values["candidate_name"],
+                values["session_id"],
+                values["run_id"],
+                values["source_filter"],
+                values["config_fingerprint"],
+                int(values["accepted_trades"]),
+                int(values["closed_trades"]),
+                float(values["realized_pnl"]),
+                float(values["win_rate"]),
+                values["expectancy"],
+                float(values["max_drawdown"]),
+                float(values["max_exposure"]),
+                values["top_1_trade_pct"],
+                values["pnl_excluding_top_1"],
+                values["pnl_excluding_top_3"],
+                int(values["settlement_unavailable"]),
+                int(values["matched"]),
+                int(values["mismatched"]),
+                int(values["unknown"]),
+                values["side_correctness_rate"],
+                json.dumps(list(values["warnings"]), sort_keys=True),
+                json.dumps(list(values["verdicts"]), sort_keys=True),
+                created_at,
+                updated_at,
+            ),
+        )
+        self.conn.commit()
+
+    def candidate_aggregate_summary(
+        self,
+        *,
+        candidate_name: str,
+        source_filter: str,
+        config_fingerprint: str,
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT *
+            FROM candidate_aggregate_summaries
+            WHERE candidate_name = ? AND source_filter = ? AND config_fingerprint = ?
+            """,
+            (candidate_name, source_filter, config_fingerprint),
+        ).fetchone()
+
+    def upsert_candidate_aggregate_summary(self, values: dict[str, Any], now: datetime) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO candidate_aggregate_summaries (
+                candidate_name, source_filter, config_fingerprint, sessions_tested,
+                accepted_trades, closed_trades, realized_pnl, win_rate, expectancy,
+                max_drawdown, max_exposure, top_1_trade_pct, pnl_excluding_top_1,
+                pnl_excluding_top_3, settlement_unavailable, matched, mismatched,
+                unknown, side_correctness_rate, aggregate_verdict_json,
+                paper_readiness_progress_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(candidate_name, source_filter, config_fingerprint)
+            DO UPDATE SET
+                sessions_tested = excluded.sessions_tested,
+                accepted_trades = excluded.accepted_trades,
+                closed_trades = excluded.closed_trades,
+                realized_pnl = excluded.realized_pnl,
+                win_rate = excluded.win_rate,
+                expectancy = excluded.expectancy,
+                max_drawdown = excluded.max_drawdown,
+                max_exposure = excluded.max_exposure,
+                top_1_trade_pct = excluded.top_1_trade_pct,
+                pnl_excluding_top_1 = excluded.pnl_excluding_top_1,
+                pnl_excluding_top_3 = excluded.pnl_excluding_top_3,
+                settlement_unavailable = excluded.settlement_unavailable,
+                matched = excluded.matched,
+                mismatched = excluded.mismatched,
+                unknown = excluded.unknown,
+                side_correctness_rate = excluded.side_correctness_rate,
+                aggregate_verdict_json = excluded.aggregate_verdict_json,
+                paper_readiness_progress_json = excluded.paper_readiness_progress_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                values["candidate_name"],
+                values["source_filter"],
+                values["config_fingerprint"],
+                int(values["sessions_tested"]),
+                int(values["accepted_trades"]),
+                int(values["closed_trades"]),
+                float(values["realized_pnl"]),
+                float(values["win_rate"]),
+                values["expectancy"],
+                float(values["max_drawdown"]),
+                float(values["max_exposure"]),
+                values["top_1_trade_pct"],
+                values["pnl_excluding_top_1"],
+                values["pnl_excluding_top_3"],
+                int(values["settlement_unavailable"]),
+                int(values["matched"]),
+                int(values["mismatched"]),
+                int(values["unknown"]),
+                values["side_correctness_rate"],
+                json.dumps(list(values["verdicts"]), sort_keys=True),
+                json.dumps(values["progress"], sort_keys=True),
+                _iso(now),
+            ),
+        )
+        self.conn.commit()
 
     def start_research_session(
         self,

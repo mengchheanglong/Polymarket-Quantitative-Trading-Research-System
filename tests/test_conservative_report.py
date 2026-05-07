@@ -144,6 +144,117 @@ def test_validate_conservative_reuses_existing_runs_and_can_rerun(tmp_path):
         store.close()
 
 
+def test_candidate_indexes_and_summary_cache(tmp_path):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+
+    store = SQLiteStore(db_path)
+    try:
+        indexes = {
+            str(row["name"])
+            for row in store.rows(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert "idx_raw_snapshots_session_source_type_time" in indexes
+        assert "idx_runs_strategy_source_session_notes" in indexes
+        assert "idx_trades_run_status" in indexes
+        assert "idx_opportunities_run_reason" in indexes
+        assert "idx_candidate_session_summaries_lookup" in indexes
+        assert store.rows("SELECT COUNT(*) AS count FROM candidate_session_summaries")[0]["count"] == 1
+        assert store.rows("SELECT COUNT(*) AS count FROM candidate_aggregate_summaries")[0]["count"] == 1
+    finally:
+        store.close()
+
+
+def test_candidate_report_uses_cache_and_refresh_does_not_duplicate_runs(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    store = SQLiteStore(db_path)
+    try:
+        raw_count = store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"]
+        run_count = store.rows("SELECT COUNT(*) AS count FROM runs")[0]["count"]
+    finally:
+        store.close()
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "candidate-report",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    report_output = capsys.readouterr().out
+    assert "Preset name: conservative-entry-30-70" in report_output
+    assert "Aggregate conservative result:" in report_output
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    validate_output = capsys.readouterr().out
+    assert "runs_reused=1" in validate_output
+    assert "runs_created=0" in validate_output
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "candidate-report",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+            "--refresh",
+        ]
+    ) == 0
+    refresh_output = capsys.readouterr().out
+    assert "Aggregate conservative result:" in refresh_output
+
+    store = SQLiteStore(db_path)
+    try:
+        assert store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"] == raw_count
+        assert store.rows("SELECT COUNT(*) AS count FROM runs")[0]["count"] == run_count
+        assert store.rows("SELECT COUNT(*) AS count FROM candidate_aggregate_summaries")[0]["count"] == 1
+    finally:
+        store.close()
+
+
 def test_preset_report_and_compare_candidates(tmp_path, capsys):
     db_path = tmp_path / "paper.sqlite3"
     _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)

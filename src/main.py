@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 import time
@@ -18,6 +19,7 @@ from src.reports.backtest import build_backtest_report
 from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
 from src.reports.conservative_report import (
+    ConservativeAggregateRow,
     ConservativeSessionRow,
     aggregate_variant_row,
     build_conservative_report,
@@ -301,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Named paper-only momentum preset to aggregate.",
     )
+    preset_report_parser.add_argument("--refresh", action="store_true", help="Refresh cached candidate summaries before reporting.")
     validate_conservative_parser = subcommands.add_parser("validate-conservative", help="Create or reuse conservative momentum runs across replay-ready public sessions")
     validate_conservative_parser.add_argument("--source", choices=("public", "all"), default="public")
     validate_conservative_parser.add_argument(
@@ -310,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Named paper-only momentum preset to validate.",
     )
     validate_conservative_parser.add_argument("--rerun", action="store_true", help="Re-run matching conservative sessions even if stored runs already exist.")
+    validate_conservative_parser.add_argument("--refresh", action="store_true", help="Refresh cached candidate summaries for matching runs.")
     validate_candidate_parser = subcommands.add_parser("validate-candidate", help="Alias for validate-conservative using --candidate")
     validate_candidate_parser.add_argument("--source", choices=("public", "all"), default="public")
     validate_candidate_parser.add_argument(
@@ -319,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Named paper-only candidate preset to validate.",
     )
     validate_candidate_parser.add_argument("--rerun", action="store_true", help="Re-run matching candidate sessions even if stored runs already exist.")
+    validate_candidate_parser.add_argument("--refresh", action="store_true", help="Refresh cached candidate summaries for matching runs.")
     candidate_report_parser = subcommands.add_parser("candidate-report", help="Alias for preset-report using --candidate")
     candidate_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     candidate_report_parser.add_argument(
@@ -327,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="Named paper-only candidate preset to summarize.",
     )
+    candidate_report_parser.add_argument("--refresh", action="store_true", help="Refresh cached candidate summaries before reporting.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -1594,19 +1600,38 @@ def preset_report(config: AgentConfig, args) -> int:
     source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
     data_store = SQLiteStore(config.database_path)
     try:
-        print(_build_preset_report_text(data_store, config, source_filter, args.preset))
+        if getattr(args, "refresh", False):
+            _refresh_candidate_cache_from_existing_runs(data_store, config, source_filter, args.preset)
+        cached = _build_cached_candidate_report_text(data_store, config, source_filter, args.preset)
+        if cached is None:
+            print("Candidate summary cache is incomplete. Run validate-candidate or use --refresh after validation.")
+            print(_build_preset_report_text(data_store, config, source_filter, args.preset))
+        else:
+            print(cached)
     finally:
         data_store.close()
     return 0
 
 
 def validate_conservative(config: AgentConfig, args) -> int:
+    started = time.monotonic()
     source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
     preset = getattr(args, "preset", None) or "conservative-entry-30-70"
     rerun = bool(getattr(args, "rerun", False))
+    refresh = bool(getattr(args, "refresh", False))
     store = SQLiteStore(config.database_path)
     try:
-        ready_sessions = _ready_public_sessions(store, source_filter=source_filter)
+        validation_config = _replace_close_mode(
+            _replace_strategy(_apply_named_preset(config, preset), "momentum"),
+            "approximate-expiry",
+        )
+        fingerprint = _candidate_config_fingerprint(validation_config)
+        ready_sessions = _candidate_validation_sessions(
+            store,
+            source_filter=source_filter,
+            candidate_name=preset,
+            config_fingerprint=fingerprint,
+        )
         print("Conservative validation")
         print(f"Source filter: {source_filter}")
         print(f"Preset: {preset}")
@@ -1614,10 +1639,10 @@ def validate_conservative(config: AgentConfig, args) -> int:
         if not ready_sessions:
             print("No replay-ready public sessions found.")
             return 0
-        validation_config = _replace_close_mode(
-            _replace_strategy(_apply_named_preset(config, preset), "momentum"),
-            "approximate-expiry",
-        )
+        runs_reused = 0
+        runs_created = 0
+        summaries_reused = 0
+        summaries_refreshed = 0
         for session_id, since, until in ready_sessions:
             existing_run = None if rerun else _matching_momentum_run(
                 store,
@@ -1627,6 +1652,25 @@ def validate_conservative(config: AgentConfig, args) -> int:
                 reverse_signal=validation_config.reverse_signal,
             )
             if existing_run is not None:
+                runs_reused += 1
+                cached = store.candidate_session_summary(
+                    candidate_name=preset,
+                    session_id=session_id,
+                    source_filter=source_filter,
+                    config_fingerprint=fingerprint,
+                )
+                if refresh or cached is None or str(cached["run_id"]) != str(existing_run["run_id"]):
+                    _refresh_candidate_session_cache(
+                        store,
+                        config,
+                        candidate_name=preset,
+                        source_filter=source_filter,
+                        config_fingerprint=fingerprint,
+                        run_id=str(existing_run["run_id"]),
+                    )
+                    summaries_refreshed += 1
+                else:
+                    summaries_reused += 1
                 print(f"{session_id} | reused_run_id={existing_run['run_id']} | realized_pnl={_fmt_money(existing_run['realized_pnl'])}")
                 continue
             outcome = _simulate_replay(
@@ -1647,11 +1691,32 @@ def validate_conservative(config: AgentConfig, args) -> int:
             if not outcome["ok"]:
                 print(f"{session_id} | failed={outcome['message']}")
                 continue
+            runs_created += 1
+            _refresh_candidate_session_cache(
+                store,
+                config,
+                candidate_name=preset,
+                source_filter=source_filter,
+                config_fingerprint=fingerprint,
+                run_id=str(outcome["run_id"]),
+            )
+            summaries_refreshed += 1
             print(
                 f"{session_id} | created_run_id={outcome['run_id']} | accepted={outcome['accepted']} | "
                 f"skipped={outcome['skipped']} | closed={outcome['closed']}"
             )
-        print(_build_preset_report_text(store, config, source_filter, preset))
+        _refresh_candidate_aggregate_cache(store, candidate_name=preset, source_filter=source_filter, config_fingerprint=fingerprint)
+        elapsed = time.monotonic() - started
+        print(
+            "Validation timing: "
+            f"sessions_scanned={len(ready_sessions)}; runs_reused={runs_reused}; runs_created={runs_created}; "
+            f"summaries_reused={summaries_reused}; summaries_refreshed={summaries_refreshed}; elapsed_seconds={elapsed:.2f}"
+        )
+        cached_report = _build_cached_candidate_report_text(store, config, source_filter, preset)
+        if cached_report is None:
+            print("Candidate summary cache is incomplete. Run validate-candidate --refresh.")
+        else:
+            print(cached_report)
     finally:
         store.close()
     return 0
@@ -2832,6 +2897,38 @@ def _ready_public_sessions(
     return sessions
 
 
+def _candidate_validation_sessions(
+    store: SQLiteStore,
+    *,
+    source_filter: str,
+    candidate_name: str,
+    config_fingerprint: str,
+) -> list[tuple[str, datetime | None, datetime | None]]:
+    sessions: list[tuple[str, datetime | None, datetime | None]] = []
+    for session in store.research_session_rows():
+        current_session_id = str(session["session_id"])
+        cached = store.candidate_session_summary(
+            candidate_name=candidate_name,
+            session_id=current_session_id,
+            source_filter=source_filter,
+            config_fingerprint=config_fingerprint,
+        )
+        if cached is not None:
+            # A cached session already proved replay readiness for this exact candidate.
+            sessions.append((current_session_id, None, None))
+            continue
+        _, since, until = _session_bounds(store, current_session_id)
+        readiness_result = store.readiness(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
+        if readiness_result["verdict"] == "READY_FOR_PUBLIC_REPLAY":
+            sessions.append((current_session_id, since, until))
+    return sessions
+
+
 def _matching_momentum_run(
     store: SQLiteStore,
     *,
@@ -3004,6 +3101,317 @@ def _build_preset_report_text(
         by_duration=_aggregate_correctness_breakdowns(session_payloads, "by_duration"),
         by_side=_aggregate_correctness_breakdowns(session_payloads, "by_side"),
     )
+
+
+def _candidate_config_fingerprint(config: AgentConfig) -> str:
+    return _conservative_preset_summary(config)
+
+
+def _refresh_candidate_cache_from_existing_runs(
+    store: SQLiteStore,
+    config: AgentConfig,
+    source_filter: str,
+    preset: str,
+) -> None:
+    validation_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, preset), "momentum"),
+        "approximate-expiry",
+    )
+    fingerprint = _candidate_config_fingerprint(validation_config)
+    for session_id, _since, _until in _ready_public_sessions(store, source_filter=source_filter):
+        run = _matching_momentum_run(
+            store,
+            session_id=session_id,
+            source_filter=source_filter,
+            preset=validation_config.momentum_preset or preset,
+            reverse_signal=validation_config.reverse_signal,
+        )
+        if run is None:
+            continue
+        _refresh_candidate_session_cache(
+            store,
+            config,
+            candidate_name=preset,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+            run_id=str(run["run_id"]),
+        )
+    _refresh_candidate_aggregate_cache(
+        store,
+        candidate_name=preset,
+        source_filter=source_filter,
+        config_fingerprint=fingerprint,
+    )
+
+
+def _refresh_candidate_session_cache(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    config_fingerprint: str,
+    run_id: str,
+) -> None:
+    row = _candidate_session_row_from_run(
+        store,
+        config,
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=config_fingerprint,
+        run_id=run_id,
+    )
+    if row is not None:
+        store.upsert_candidate_session_summary(row, datetime.now(timezone.utc))
+
+
+def _candidate_session_row_from_run(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    config_fingerprint: str,
+    run_id: str,
+) -> dict[str, object] | None:
+    run = store.run_by_id(run_id)
+    if run is None or not run["session_id"]:
+        return None
+    report = build_report(store, config.starting_balance, run_id=run_id)
+    _audit_run, audit_rows = load_signal_audit_rows(store, run_id)
+    audit_summary = summarize_signal_audit_rows(audit_rows)
+    verdicts = conservative_readiness_verdict(
+        closed_trades=report.closed_trades,
+        realized_pnl=report.realized_pnl,
+        expectancy=report.expectancy_per_trade,
+        pnl_excluding_top_3=report.pnl_excluding_top_3,
+        top_1_trade_pct=report.top_1_trade_pct_of_total_pnl,
+        side_correctness_rate=audit_summary["correctness_rate"],
+        max_drawdown=report.max_equity_drawdown,
+        drawdown_limit=config.session_loss_limit_usd,
+    )
+    accepted = store.rows("SELECT COUNT(*) AS count FROM trades WHERE run_id = ?", (run_id,))[0]["count"]
+    return {
+        "candidate_name": candidate_name,
+        "session_id": str(run["session_id"]),
+        "run_id": run_id,
+        "source_filter": source_filter,
+        "config_fingerprint": config_fingerprint,
+        "accepted_trades": int(accepted),
+        "closed_trades": report.closed_trades,
+        "realized_pnl": report.realized_pnl,
+        "win_rate": report.win_rate,
+        "expectancy": report.expectancy_per_trade,
+        "max_drawdown": report.max_equity_drawdown,
+        "max_exposure": report.max_position_exposure,
+        "top_1_trade_pct": report.top_1_trade_pct_of_total_pnl,
+        "pnl_excluding_top_1": report.pnl_excluding_top_1,
+        "pnl_excluding_top_3": report.pnl_excluding_top_3,
+        "settlement_unavailable": report.settlement_unavailable,
+        "matched": int(audit_summary["matched"]),
+        "mismatched": int(audit_summary["mismatched"]),
+        "unknown": int(audit_summary["unknown"]),
+        "side_correctness_rate": audit_summary["correctness_rate"],
+        "warnings": report.warnings,
+        "verdicts": verdicts,
+    }
+
+
+def _refresh_candidate_aggregate_cache(
+    store: SQLiteStore,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    config_fingerprint: str,
+) -> None:
+    rows = store.candidate_session_summary_rows(
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=config_fingerprint,
+    )
+    if not rows:
+        return
+    run_ids = [str(row["run_id"]) for row in rows]
+    placeholders = ",".join("?" for _ in run_ids)
+    trade_rows = store.rows(
+        f"SELECT pnl FROM trades WHERE status LIKE 'CLOSED%' AND pnl IS NOT NULL AND run_id IN ({placeholders})",
+        tuple(run_ids),
+    )
+    closed_pnls = [float(row["pnl"] or 0.0) for row in trade_rows]
+    realized_pnl = sum(closed_pnls)
+    wins = sum(1 for value in closed_pnls if value > 0)
+    matched = sum(int(row["matched"]) for row in rows)
+    mismatched = sum(int(row["mismatched"]) for row in rows)
+    unknown = sum(int(row["unknown"]) for row in rows)
+    resolved = matched + mismatched
+    concentration = _closed_pnl_concentration(closed_pnls)
+    closed_trades = len(closed_pnls)
+    expectancy = realized_pnl / closed_trades if closed_trades else None
+    verdicts = conservative_readiness_verdict(
+        closed_trades=closed_trades,
+        realized_pnl=realized_pnl,
+        expectancy=expectancy,
+        pnl_excluding_top_3=concentration["pnl_excluding_top_3"],
+        top_1_trade_pct=concentration["top_1_trade_pct"],
+        side_correctness_rate=(matched / resolved) if resolved else None,
+        max_drawdown=max((float(row["max_drawdown"]) for row in rows), default=0.0),
+        drawdown_limit=None,
+    )
+    progress = {
+        "closed_trades_target": 50,
+        "closed_trades_remaining": max(0, 50 - closed_trades),
+        "side_correctness_target": 0.55,
+        "pnl_excluding_top_3_positive": (concentration["pnl_excluding_top_3"] or 0.0) > 0,
+        "top_1_below_40pct": (
+            concentration["top_1_trade_pct"] is not None and concentration["top_1_trade_pct"] < 0.40
+        ),
+    }
+    store.upsert_candidate_aggregate_summary(
+        {
+            "candidate_name": candidate_name,
+            "source_filter": source_filter,
+            "config_fingerprint": config_fingerprint,
+            "sessions_tested": len(rows),
+            "accepted_trades": sum(int(row["accepted_trades"]) for row in rows),
+            "closed_trades": closed_trades,
+            "realized_pnl": realized_pnl,
+            "win_rate": (wins / closed_trades) if closed_trades else 0.0,
+            "expectancy": expectancy,
+            "max_drawdown": max((float(row["max_drawdown"]) for row in rows), default=0.0),
+            "max_exposure": max((float(row["max_exposure"]) for row in rows), default=0.0),
+            "top_1_trade_pct": concentration["top_1_trade_pct"],
+            "pnl_excluding_top_1": concentration["pnl_excluding_top_1"],
+            "pnl_excluding_top_3": concentration["pnl_excluding_top_3"],
+            "settlement_unavailable": sum(int(row["settlement_unavailable"]) for row in rows),
+            "matched": matched,
+            "mismatched": mismatched,
+            "unknown": unknown,
+            "side_correctness_rate": (matched / resolved) if resolved else None,
+            "verdicts": verdicts,
+            "progress": progress,
+        },
+        datetime.now(timezone.utc),
+    )
+
+
+def _build_cached_candidate_report_text(
+    store: SQLiteStore,
+    config: AgentConfig,
+    source_filter: str,
+    preset: str,
+) -> str | None:
+    validation_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, preset), "momentum"),
+        "approximate-expiry",
+    )
+    fingerprint = _candidate_config_fingerprint(validation_config)
+    session_cache_rows = store.candidate_session_summary_rows(
+        candidate_name=preset,
+        source_filter=source_filter,
+        config_fingerprint=fingerprint,
+    )
+    aggregate_cache = store.candidate_aggregate_summary(
+        candidate_name=preset,
+        source_filter=source_filter,
+        config_fingerprint=fingerprint,
+    )
+    if not session_cache_rows or aggregate_cache is None:
+        return None
+    session_rows = [_cached_session_row(row) for row in session_cache_rows]
+    aggregate_row = _cached_aggregate_row(preset, aggregate_cache)
+    by_asset = _cached_breakdown("BTC", aggregate_row)
+    by_duration = _cached_breakdown("5m", aggregate_row)
+    return build_conservative_report(
+        source_filter=source_filter,
+        preset_name=preset,
+        preset_summary=_conservative_preset_summary(validation_config),
+        session_rows=session_rows,
+        aggregate_row=aggregate_row,
+        variant_rows=[],
+        by_asset=by_asset,
+        by_duration=by_duration,
+        by_side={},
+    )
+
+
+def _cached_session_row(row) -> ConservativeSessionRow:
+    return ConservativeSessionRow(
+        session_id=str(row["session_id"]),
+        accepted_trades=int(row["accepted_trades"]),
+        closed_trades=int(row["closed_trades"]),
+        realized_pnl=float(row["realized_pnl"]),
+        win_rate=float(row["win_rate"]),
+        expectancy=_maybe_float(row["expectancy"]),
+        max_drawdown=float(row["max_drawdown"]),
+        max_exposure=float(row["max_exposure"]),
+        top_1_trade_pct=_maybe_float(row["top_1_trade_pct"]),
+        pnl_excluding_top_1=_maybe_float(row["pnl_excluding_top_1"]),
+        pnl_excluding_top_3=_maybe_float(row["pnl_excluding_top_3"]),
+        settlement_unavailable=int(row["settlement_unavailable"]),
+        matched=int(row["matched"]),
+        mismatched=int(row["mismatched"]),
+        unknown=int(row["unknown"]),
+        side_correctness_rate=_maybe_float(row["side_correctness_rate"]),
+        warnings=tuple(json.loads(str(row["warnings_json"] or "[]"))),
+        verdicts=tuple(json.loads(str(row["verdicts_json"] or "[]"))),
+    )
+
+
+def _cached_aggregate_row(label: str, row) -> ConservativeAggregateRow:
+    return ConservativeAggregateRow(
+        label=label,
+        sessions_tested=int(row["sessions_tested"]),
+        accepted_trades=int(row["accepted_trades"]),
+        closed_trades=int(row["closed_trades"]),
+        realized_pnl=float(row["realized_pnl"]),
+        win_rate=float(row["win_rate"]),
+        expectancy=_maybe_float(row["expectancy"]),
+        max_drawdown=float(row["max_drawdown"]),
+        max_exposure=float(row["max_exposure"]),
+        top_1_trade_pct=_maybe_float(row["top_1_trade_pct"]),
+        pnl_excluding_top_1=_maybe_float(row["pnl_excluding_top_1"]),
+        pnl_excluding_top_3=_maybe_float(row["pnl_excluding_top_3"]),
+        settlement_unavailable=int(row["settlement_unavailable"]),
+        matched=int(row["matched"]),
+        mismatched=int(row["mismatched"]),
+        unknown=int(row["unknown"]),
+        side_correctness_rate=_maybe_float(row["side_correctness_rate"]),
+        warnings=(),
+        verdicts=tuple(json.loads(str(row["aggregate_verdict_json"] or "[]"))),
+    )
+
+
+def _cached_breakdown(label: str, row: ConservativeAggregateRow) -> dict[str, dict[str, float | int | None]]:
+    return {
+        label: {
+            "matched": row.matched,
+            "mismatched": row.mismatched,
+            "unknown": row.unknown,
+            "correctness_rate": row.side_correctness_rate,
+        }
+    }
+
+
+def _maybe_float(value) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _closed_pnl_concentration(values: list[float]) -> dict[str, float | None]:
+    pnls = sorted(values, reverse=True)
+    realized_pnl = sum(pnls)
+    if not pnls:
+        return {
+            "top_1_trade_pct": None,
+            "pnl_excluding_top_1": None,
+            "pnl_excluding_top_3": None,
+        }
+    top_1 = pnls[0]
+    top_3 = sum(pnls[:3])
+    return {
+        "top_1_trade_pct": (top_1 / realized_pnl) if realized_pnl else None,
+        "pnl_excluding_top_1": realized_pnl - top_1,
+        "pnl_excluding_top_3": realized_pnl - top_3,
+    }
 
 
 def _aggregate_correctness_breakdowns(session_payloads: list[dict], key: str) -> dict[str, dict[str, float | int | None]]:
