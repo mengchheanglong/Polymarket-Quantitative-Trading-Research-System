@@ -352,6 +352,42 @@ It is the main paper candidate because it currently has the cleanest mix of side
 - top-1 trade contribution staying below `40%`
 - per-session and aggregate verdicts staying out of `TAIL_RISK_DOMINATED`
 
+Phase 20 adds degradation auditing and stricter stored-snapshot candidate search for `conservative-entry-30-70`:
+
+```powershell
+python -m src.main degradation-audit --candidate conservative-entry-30-70 --source public
+python -m src.main strict-candidate-sweep --candidate conservative-entry-30-70 --source public
+python -m src.main strict-candidate-ranking --source public
+```
+
+`degradation-audit` compares early vs recent sessions, profitable vs losing sessions, and sessions above or below the side-correctness gate. It also breaks matched and mismatched accepted trades down by side, entry-price bucket, seconds to expiry, spread, edge, time of day, and underlying BTC movement when available.
+
+`strict-candidate-sweep` is a paper-only post-filter over the promoted candidate's accepted trades. It checks stricter variants such as `entry-0.40-0.70`, `UP-only`, higher edge thresholds, tighter spread thresholds, and narrower expiry windows without changing the live-safety boundary or promoting a new preset automatically.
+
+Positive PnL is not enough if side correctness is weak. The `55%` side-correctness level is only a research-continuation gate, not a live-money gate. A higher paper-promising standard should require at least `100+` closed trades, `58-60%+` side correctness, positive expectancy, positive PnL after removing top trades, no degrading trend, and no safety violations.
+
+Phase 21 adds out-of-sample validation so interesting Phase 20 filters are frozen before judging later sessions:
+
+```powershell
+python -m src.main outsample-report --source public --since 2026-05-07T12:00:00Z
+python -m src.main validation-target --source public --since 2026-05-07T12:00:00Z
+```
+
+The frozen variants are not optimized dynamically:
+
+- base `conservative-entry-30-70`
+- `expiry-90-150`
+- `UP-only entry-0.40-0.70`
+- `entry-0.40-0.50`
+- `entry-0.40-0.70`
+- `near-flat pre-entry BTC move`
+- `entry-0.40-0.70 + expiry-90-150`
+- `UP-only entry-0.40-0.70 + expiry-90-150`
+
+`outsample-report` separates in-sample sessions before the cutoff from out-of-sample sessions after the cutoff. `OUTSAMPLE_PROMISING` requires at least 30 out-of-sample closed trades, side correctness of at least `58%`, positive expectancy, positive PnL excluding top 3 trades, top-1 contribution below `40%`, no degrading trend, and at least `60%` profitable out-of-sample sessions.
+
+This is still paper-only validation. Freezing variants helps reduce overfitting, but even a passing out-of-sample report would still be research evidence, not permission to trade real money.
+
 ## Observe And Dataset Building
 
 Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.

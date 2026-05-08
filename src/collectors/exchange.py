@@ -122,11 +122,14 @@ class FallbackExchangeCollector:
 
     def collect_prices(self) -> list[PriceSnapshot]:
         errors: list[str] = []
+        collected: list[PriceSnapshot] = []
         for collector in self.collectors:
             try:
-                return collector.collect_prices()
+                collected.extend(collector.collect_prices())
             except Exception as exc:
                 errors.append(f"{collector.__class__.__name__}: {exc}")
+        if collected:
+            return collected
         raise RuntimeError("; ".join(errors))
 
     def recent_candles(self, asset: Asset, granularity: int = 60) -> list[Candle]:

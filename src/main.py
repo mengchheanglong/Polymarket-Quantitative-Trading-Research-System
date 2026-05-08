@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +16,7 @@ from src.collectors.mock_markets import MockMarketSource
 from src.collectors.polymarket import PolymarketPublicCollector, _candidate_to_market
 from src.config import AgentConfig, load_config
 from src.http_client import HttpError
-from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook, Signal
+from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook, PriceSnapshot, Signal
 from src.reports.backtest import build_backtest_report
 from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
@@ -333,6 +335,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Named paper-only candidate preset to summarize.",
     )
     candidate_report_parser.add_argument("--refresh", action="store_true", help="Refresh cached candidate summaries before reporting.")
+    degradation_audit_parser = subcommands.add_parser("degradation-audit", help="Audit candidate degradation from cached paper runs")
+    degradation_audit_parser.add_argument("--source", choices=("public", "all"), default="public")
+    degradation_audit_parser.add_argument(
+        "--candidate",
+        choices=("conservative-entry-30-70",),
+        required=True,
+        help="Named paper-only candidate to audit.",
+    )
+    strict_sweep_parser = subcommands.add_parser("strict-candidate-sweep", help="Run stricter paper-only candidate variants")
+    strict_sweep_parser.add_argument("--source", choices=("public", "all"), default="public")
+    strict_sweep_parser.add_argument(
+        "--candidate",
+        choices=("conservative-entry-30-70",),
+        required=True,
+        help="Named paper-only candidate to use as the base.",
+    )
+    strict_sweep_parser.add_argument("--refresh", action="store_true", help="Refresh cached strict variant summaries.")
+    strict_ranking_parser = subcommands.add_parser("strict-candidate-ranking", help="Rank stricter paper-only candidate variants")
+    strict_ranking_parser.add_argument("--source", choices=("public", "all"), default="public")
+    strict_ranking_parser.add_argument("--refresh", action="store_true", help="Refresh cached strict variant summaries before ranking.")
+    outsample_report_parser = subcommands.add_parser("outsample-report", help="Validate frozen paper variants after an out-of-sample cutoff")
+    outsample_report_parser.add_argument("--source", choices=("public", "all"), default="public")
+    outsample_report_parser.add_argument("--candidate", choices=("conservative-entry-30-70",), default="conservative-entry-30-70")
+    outsample_report_parser.add_argument("--since", required=True, help="ISO timestamp that separates in-sample from out-of-sample sessions.")
+    validation_target_parser = subcommands.add_parser("validation-target", help="Show out-of-sample closed-trade targets for frozen variants")
+    validation_target_parser.add_argument("--source", choices=("public", "all"), default="public")
+    validation_target_parser.add_argument("--candidate", choices=("conservative-entry-30-70",), default="conservative-entry-30-70")
+    validation_target_parser.add_argument("--since", required=True, help="ISO timestamp that separates in-sample from out-of-sample sessions.")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -429,6 +459,16 @@ def main(argv: list[str] | None = None) -> int:
             return validate_candidate(config, args)
         if args.command == "candidate-report":
             return candidate_report(config, args)
+        if args.command == "degradation-audit":
+            return degradation_audit(config, args)
+        if args.command == "strict-candidate-sweep":
+            return strict_candidate_sweep(config, args)
+        if args.command == "strict-candidate-ranking":
+            return strict_candidate_ranking(config, args)
+        if args.command == "outsample-report":
+            return outsample_report(config, args)
+        if args.command == "validation-target":
+            return validation_target(config, args)
     except SafetyError as exc:
         print(f"Safety error: {exc}", file=sys.stderr)
         return 2
@@ -501,7 +541,7 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
             ]
         )
         try:
-            prices = _collect_public_prices(exchange, profile["assets"])
+            raw_prices = _collect_public_prices(exchange, profile["assets"])
         except Exception as exc:
             store.log_raw_snapshot(
                 now,
@@ -514,17 +554,27 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
                 session_id=session_id,
             )
             raise HttpError(f"public exchange collection failed: {exc}") from exc
-        for snapshot in prices:
+        price_records = [(_normalize_public_price_snapshot(snapshot, now), snapshot.timestamp) for snapshot in raw_prices]
+        candled_assets: set[Asset] = set()
+        for snapshot, exchange_timestamp in price_records:
             store.log_price(snapshot, session_id=session_id)
             store.log_raw_snapshot(
                 now,
                 snapshot.source,
                 snapshot.asset.value,
                 "exchange_price",
-                {"price": snapshot.price, "source": snapshot.source},
+                {
+                    "price": snapshot.price,
+                    "source": snapshot.source,
+                    "exchange_timestamp": exchange_timestamp.astimezone(timezone.utc).isoformat(),
+                    "stored_observed_at": snapshot.timestamp.astimezone(timezone.utc).isoformat(),
+                },
                 status="ok",
                 session_id=session_id,
             )
+            if snapshot.asset in candled_assets:
+                print(f"{snapshot.asset.value} {snapshot.price:.2f} from {snapshot.source}")
+                continue
             try:
                 candles = exchange.recent_candles(snapshot.asset, granularity=60)
             except Exception as exc:
@@ -538,14 +588,16 @@ def collect(config: AgentConfig, session_id: str | None = None) -> int:
                     error_message=str(exc),
                     session_id=session_id,
                 )
-                raise HttpError(f"public exchange candle collection failed: {exc}") from exc
-            store.log_candles(
-                asset=snapshot.asset.value,
-                candles=candles,
-                source=snapshot.source,
-                observed_at=now,
-                session_id=session_id,
-            )
+                candles = []
+            if candles:
+                store.log_candles(
+                    asset=snapshot.asset.value,
+                    candles=candles,
+                    source=snapshot.source,
+                    observed_at=now,
+                    session_id=session_id,
+                )
+            candled_assets.add(snapshot.asset)
             print(f"{snapshot.asset.value} {snapshot.price:.2f} from {snapshot.source}")
 
         polymarket = PolymarketPublicCollector(config.gamma_base_url, config.clob_base_url)
@@ -802,6 +854,7 @@ def session_report(config: AgentConfig, args) -> int:
         quality = store.data_quality_metrics(source_filter="public", since=since, until=until, session_id=session_id)
         readiness_result = store.readiness(source_filter="public", since=since, until=until, session_id=session_id)
         markets = store.market_audit_rows(source_filter="public", since=since, until=until, session_id=session_id)
+        exchange_lines = _session_exchange_diagnostic_lines(store, session_id, since, until)
         found = sum(1 for row in markets if row["accepted"])
         orderbooks = sum(1 for row in markets if row["orderbook_status"] == "FOUND")
         assets = summary["assets_seen"]
@@ -821,6 +874,9 @@ def session_report(config: AgentConfig, args) -> int:
         print(f"Snapshot count: {summary['total_snapshots']}")
         print(f"Failed snapshot count: {summary['failed_snapshots']}")
         print(f"Public sources used: {_format_sources(summary['source_coverage'].keys())}")
+        print("Exchange price snapshots by source:")
+        for line in exchange_lines:
+            print(line)
         print(f"BTC/ETH markets found: {found}")
         print(f"Orderbooks captured: {orderbooks}")
         print(f"Readiness verdict: {readiness_result['verdict']}")
@@ -835,6 +891,7 @@ def session_report(config: AgentConfig, args) -> int:
             f"missing_orderbooks={quality['missing_orderbooks']}, "
             f"missing_prices={quality['missing_prices']}"
         )
+        print(f"Validation status: {_validation_status_line(readiness_result['verdict'])}")
         print(f"Market discovery summary: accepted={found}, rejected={len(markets) - found}")
         print(f"Recommended next command: {_recommended_next_command(readiness_result['verdict'], session_id)}")
     finally:
@@ -902,6 +959,81 @@ def research_report(config: AgentConfig, args) -> int:
     finally:
         store.close()
     return 0
+
+
+def _session_exchange_diagnostic_lines(
+    store: SQLiteStore,
+    session_id: str,
+    since: datetime | None,
+    until: datetime | None,
+) -> list[str]:
+    raw_rows = store.rows(
+        """
+        SELECT source_name, asset, COUNT(*) AS count, MIN(observed_at) AS first_seen, MAX(observed_at) AS latest_seen
+        FROM raw_snapshots
+        WHERE session_id = ? AND snapshot_type = 'exchange_price'
+        GROUP BY source_name, asset
+        ORDER BY source_name, asset
+        """,
+        (session_id,),
+    )
+    if not raw_rows:
+        return ["none"]
+    price_rows = {
+        (str(row["source"]), str(row["asset"])): row
+        for row in store.rows(
+            """
+            SELECT source, asset, COUNT(*) AS count, MIN(observed_at) AS first_seen, MAX(observed_at) AS latest_seen
+            FROM price_snapshots
+            WHERE session_id = ?
+            GROUP BY source, asset
+            ORDER BY source, asset
+            """,
+            (session_id,),
+        )
+    }
+    latest_visible = store.latest_prices(source_filter="public", since=since, until=until, session_id=session_id)
+    lines: list[str] = []
+    for row in raw_rows:
+        key = (str(row["source_name"]), str(row["asset"]))
+        stored = price_rows.get(key)
+        raw_latest = str(row["latest_seen"])
+        stored_latest = str(stored["latest_seen"]) if stored is not None else "none"
+        visible_snapshot = store.latest_price(
+            asset=str(row["asset"]),
+            source_prefix=str(row["source_name"]),
+            source_filter="public",
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
+        visible_label = (
+            visible_snapshot.timestamp.isoformat()
+            if visible_snapshot is not None
+            else "n/a"
+        )
+        stale_by_source = 0 if visible_snapshot is not None else int(row["count"])
+        lines.append(
+            " | ".join(
+                [
+                    f"{row['source_name']}:{row['asset']}",
+                    f"raw_snapshots={row['count']}",
+                    f"raw_latest={raw_latest}",
+                    f"stored_latest={stored_latest}",
+                    f"latest_visible_price_ts={visible_label}",
+                    f"stale_exchange_by_source={stale_by_source}",
+                ]
+            )
+        )
+    return lines
+
+
+def _validation_status_line(verdict: str) -> str:
+    if verdict == "READY_FOR_PUBLIC_REPLAY":
+        return "included in candidate validation"
+    if verdict == "MISSING_EXCHANGE_PRICES":
+        return "excluded from validation: missing usable BTC exchange prices"
+    return f"excluded from validation: {verdict}"
 
 
 def run_paper(config: AgentConfig) -> int:
@@ -1632,10 +1764,28 @@ def validate_conservative(config: AgentConfig, args) -> int:
             candidate_name=preset,
             config_fingerprint=fingerprint,
         )
+        blockers = _candidate_validation_blockers(
+            store,
+            source_filter=source_filter,
+            candidate_name=preset,
+            config_fingerprint=fingerprint,
+        )
         print("Conservative validation")
         print(f"Source filter: {source_filter}")
         print(f"Preset: {preset}")
         print(f"Ready sessions found: {len(ready_sessions)}")
+        for blocker in blockers:
+            print(
+                " | ".join(
+                    [
+                        f"{blocker['session_id']}",
+                        f"reason={blocker['reason']}",
+                        f"exchange_price_snapshots={blocker['exchange_price_snapshots']}",
+                        f"stale_exchange_prices={blocker['stale_exchange_prices']}",
+                        f"suggested_fix={blocker['suggested_fix']}",
+                    ]
+                )
+            )
         if not ready_sessions:
             print("No replay-ready public sessions found.")
             return 0
@@ -1732,6 +1882,143 @@ def candidate_report(config: AgentConfig, args) -> int:
     alias_args = argparse.Namespace(**vars(args))
     alias_args.preset = args.candidate
     return preset_report(config, alias_args)
+
+
+def degradation_audit(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    candidate_name = getattr(args, "candidate")
+    store = SQLiteStore(config.database_path)
+    try:
+        validation_config = _replace_close_mode(
+            _replace_strategy(_apply_named_preset(config, candidate_name), "momentum"),
+            "approximate-expiry",
+        )
+        fingerprint = _candidate_config_fingerprint(validation_config)
+        cached_rows = store.candidate_session_summary_rows(
+            candidate_name=candidate_name,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+        )
+        aggregate = store.candidate_aggregate_summary(
+            candidate_name=candidate_name,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+        )
+        if not cached_rows or aggregate is None:
+            print("Degradation audit")
+            print("Candidate cache is incomplete. Run validate-candidate first.")
+            return 1
+        print(
+            _build_degradation_audit_text(
+                store,
+                candidate_name=candidate_name,
+                source_filter=source_filter,
+                cached_rows=cached_rows,
+                aggregate=aggregate,
+            )
+        )
+    finally:
+        store.close()
+    return 0
+
+
+def strict_candidate_sweep(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    candidate_name = getattr(args, "candidate")
+    refresh = bool(getattr(args, "refresh", False))
+    store = SQLiteStore(config.database_path)
+    started = time.monotonic()
+    try:
+        rows, timing = _strict_candidate_rows(
+            store,
+            config,
+            source_filter=source_filter,
+            candidate_name=candidate_name,
+            refresh=refresh,
+        )
+        elapsed = time.monotonic() - started
+        print(_build_strict_sweep_text(source_filter=source_filter, rows=rows, timing={**timing, "elapsed_seconds": elapsed}))
+    finally:
+        store.close()
+    return 0
+
+
+def strict_candidate_ranking(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    refresh = bool(getattr(args, "refresh", False))
+    store = SQLiteStore(config.database_path)
+    started = time.monotonic()
+    try:
+        rows, timing = _strict_candidate_rows(
+            store,
+            config,
+            source_filter=source_filter,
+            candidate_name="conservative-entry-30-70",
+            refresh=refresh,
+        )
+        elapsed = time.monotonic() - started
+        print(_build_strict_ranking_text(source_filter=source_filter, rows=rows, timing={**timing, "elapsed_seconds": elapsed}))
+    finally:
+        store.close()
+    return 0
+
+
+def outsample_report(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    candidate_name = getattr(args, "candidate", "conservative-entry-30-70")
+    cutoff = _parse_since(getattr(args, "since"))
+    if cutoff is None:
+        raise ValueError("--since is required")
+    store = SQLiteStore(config.database_path)
+    try:
+        rows, _base_rows = _outsample_variant_rows(
+            store,
+            config,
+            source_filter=source_filter,
+            candidate_name=candidate_name,
+            cutoff=cutoff,
+        )
+        print(
+            _build_outsample_report_text(
+                source_filter=source_filter,
+                candidate_name=candidate_name,
+                cutoff=cutoff,
+                rows=rows,
+            )
+        )
+    finally:
+        store.close()
+    return 0
+
+
+def validation_target(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    candidate_name = getattr(args, "candidate", "conservative-entry-30-70")
+    cutoff = _parse_since(getattr(args, "since"))
+    if cutoff is None:
+        raise ValueError("--since is required")
+    store = SQLiteStore(config.database_path)
+    try:
+        rows, base_rows = _outsample_variant_rows(
+            store,
+            config,
+            source_filter=source_filter,
+            candidate_name=candidate_name,
+            cutoff=cutoff,
+        )
+        print(
+            _build_validation_target_text(
+                store,
+                source_filter=source_filter,
+                candidate_name=candidate_name,
+                cutoff=cutoff,
+                rows=rows,
+                base_rows=base_rows,
+            )
+        )
+    finally:
+        store.close()
+    return 0
 
 
 def readiness(config: AgentConfig, args) -> int:
@@ -2929,6 +3216,61 @@ def _candidate_validation_sessions(
     return sessions
 
 
+def _candidate_validation_blockers(
+    store: SQLiteStore,
+    *,
+    source_filter: str,
+    candidate_name: str,
+    config_fingerprint: str,
+) -> list[dict[str, object]]:
+    blockers: list[dict[str, object]] = []
+    for session in store.research_session_rows():
+        current_session_id = str(session["session_id"])
+        cached = store.candidate_session_summary(
+            candidate_name=candidate_name,
+            session_id=current_session_id,
+            source_filter=source_filter,
+            config_fingerprint=config_fingerprint,
+        )
+        if cached is not None:
+            continue
+        _, since, until = _session_bounds(store, current_session_id)
+        readiness_result = store.readiness(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
+        if readiness_result["verdict"] != "MISSING_EXCHANGE_PRICES":
+            continue
+        quality = store.data_quality_metrics(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
+        summary = store.dataset_summary(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
+        blockers.append(
+            {
+                "session_id": current_session_id,
+                "reason": readiness_result["verdict"],
+                "exchange_price_snapshots": summary["exchange_price_snapshots"],
+                "stale_exchange_prices": quality["stale_exchange_prices"],
+                "suggested_fix": (
+                    "collect BTC prices from Coinbase and Kraken in a new focused session"
+                    if summary["exchange_price_snapshots"] == 0
+                    else "session has BTC price snapshots but they are stale or outside the replay window"
+                ),
+            }
+        )
+    return blockers
+
+
 def _matching_momentum_run(
     store: SQLiteStore,
     *,
@@ -3414,6 +3756,922 @@ def _closed_pnl_concentration(values: list[float]) -> dict[str, float | None]:
     }
 
 
+def _build_degradation_audit_text(
+    store: SQLiteStore,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    cached_rows,
+    aggregate,
+) -> str:
+    rows = sorted(
+        [_cached_session_row(row) for row in cached_rows],
+        key=lambda row: _session_started_at(store, row.session_id) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    midpoint = max(1, len(rows) // 2)
+    early_rows = rows[:midpoint]
+    recent_rows = rows[midpoint:]
+    profitable_rows = [row for row in rows if row.realized_pnl > 0]
+    losing_rows = [row for row in rows if row.realized_pnl < 0]
+    strong_side_rows = [row for row in rows if (row.side_correctness_rate or 0.0) >= 0.55]
+    weak_side_rows = [row for row in rows if row.side_correctness_rate is not None and row.side_correctness_rate < 0.55]
+    run_ids = [str(row["run_id"]) for row in cached_rows]
+    signal_rows = _candidate_signal_rows(store, run_ids)
+    feature_lines = _feature_breakdown_lines(signal_rows)
+    aggregate_row = _cached_aggregate_row(candidate_name, aggregate)
+    trend = _candidate_trend(rows)
+    lines = [
+        "Degradation audit",
+        "Research only: cached paper runs and stored snapshots, no execution.",
+        f"Source filter: {source_filter}",
+        f"Candidate: {candidate_name}",
+        "Overall candidate aggregate:",
+        _candidate_group_line("overall", [aggregate_row]),
+        _candidate_session_group_line("early sessions", early_rows),
+        _candidate_session_group_line("recent sessions", recent_rows),
+        _candidate_session_group_line("profitable sessions", profitable_rows),
+        _candidate_session_group_line("losing sessions", losing_rows),
+        _candidate_session_group_line("side correctness >=55%", strong_side_rows),
+        _candidate_session_group_line("side correctness <55%", weak_side_rows),
+        f"Performance trend: {trend}",
+        "Trend by session order:",
+    ]
+    for row in rows:
+        started_at = _session_started_at(store, row.session_id)
+        lines.append(
+            " | ".join(
+                [
+                    row.session_id,
+                    f"started_at={started_at.isoformat() if started_at else 'n/a'}",
+                    f"closed={row.closed_trades}",
+                    f"realized_pnl={_fmt_money(row.realized_pnl)}",
+                    f"expectancy={_fmt_money(row.expectancy)}",
+                    f"side_correctness={_fmt_pct(row.side_correctness_rate)}",
+                    f"top_1={_fmt_pct(row.top_1_trade_pct)}",
+                    f"pnl_ex_top_3={_fmt_money(row.pnl_excluding_top_3)}",
+                    f"verdicts={', '.join(row.verdicts)}",
+                ]
+            )
+        )
+    lines.append("Matched vs mismatched feature breakdown:")
+    lines.extend(feature_lines)
+    return "\n".join(lines)
+
+
+def _strict_candidate_rows(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str,
+    candidate_name: str,
+    refresh: bool,
+) -> tuple[list[ConservativeAggregateRow], dict[str, int]]:
+    base_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, candidate_name), "momentum"),
+        "approximate-expiry",
+    )
+    base_fingerprint = _candidate_config_fingerprint(base_config)
+    base_rows = store.candidate_session_summary_rows(
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=base_fingerprint,
+    )
+    rows: list[ConservativeAggregateRow] = []
+    timing = {
+        "sessions_scanned": len(base_rows),
+        "variants_tested": 0,
+        "runs_reused": 0,
+        "runs_created": 0,
+        "summaries_reused": 0,
+        "summaries_refreshed": 0,
+    }
+    if not base_rows:
+        return rows, timing
+    base_by_session = {str(row["session_id"]): row for row in base_rows}
+    for label, variant_config, predicate in _strict_candidate_variants(base_config):
+        timing["variants_tested"] += 1
+        fingerprint = _candidate_config_fingerprint(variant_config)
+        for session_id, base_row in base_by_session.items():
+            cached = store.candidate_session_summary(
+                candidate_name=label,
+                session_id=session_id,
+                source_filter=source_filter,
+                config_fingerprint=fingerprint,
+            )
+            if cached is not None and not refresh:
+                timing["summaries_reused"] += 1
+                timing["runs_reused"] += 1
+                continue
+            _refresh_strict_variant_session_cache(
+                store,
+                candidate_name=label,
+                source_filter=source_filter,
+                config_fingerprint=fingerprint,
+                base_row=base_row,
+                predicate=predicate,
+                variant_config=variant_config,
+            )
+            timing["summaries_refreshed"] += 1
+            timing["runs_reused"] += 1
+        _refresh_strict_variant_aggregate_cache(
+            store,
+            candidate_name=label,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+            base_rows=base_rows,
+            predicate=predicate,
+        )
+        aggregate = store.candidate_aggregate_summary(
+            candidate_name=label,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+        )
+        if aggregate is not None:
+            row = _cached_aggregate_row(label, aggregate)
+            session_rows = store.candidate_session_summary_rows(
+                candidate_name=label,
+                source_filter=source_filter,
+                config_fingerprint=fingerprint,
+            )
+            object.__setattr__(row, "profitable_sessions", sum(1 for item in session_rows if float(item["realized_pnl"]) > 0))
+            object.__setattr__(row, "losing_sessions", sum(1 for item in session_rows if float(item["realized_pnl"]) < 0))
+            object.__setattr__(row, "trend", _candidate_trend([_cached_session_row(item) for item in session_rows]))
+            rows.append(row)
+    return rows, timing
+
+
+def _strict_candidate_variants(config: AgentConfig) -> list[tuple[str, AgentConfig, object]]:
+    return [
+        ("base conservative-entry-30-70", config, lambda row: True),
+        ("entry-0.40-0.70", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70), lambda row: 0.40 <= row.entry_price <= 0.70),
+        ("entry-0.35-0.65", _replace_config_values(config, momentum_min_entry_price=0.35, momentum_max_entry_price=0.65), lambda row: 0.35 <= row.entry_price <= 0.65),
+        ("entry-0.40-0.65", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.65), lambda row: 0.40 <= row.entry_price <= 0.65),
+        ("entry-0.45-0.65", _replace_config_values(config, momentum_min_entry_price=0.45, momentum_max_entry_price=0.65), lambda row: 0.45 <= row.entry_price <= 0.65),
+        ("UP-only", _replace_config_values(config, momentum_side_filter="UP"), lambda row: row.side == "UP"),
+        ("DOWN-only", _replace_config_values(config, momentum_side_filter="DOWN"), lambda row: row.side == "DOWN"),
+        ("UP-only entry-0.40-0.70", _replace_config_values(config, momentum_side_filter="UP", momentum_min_entry_price=0.40, momentum_max_entry_price=0.70), lambda row: row.side == "UP" and 0.40 <= row.entry_price <= 0.70),
+        ("DOWN-only entry-0.40-0.70", _replace_config_values(config, momentum_side_filter="DOWN", momentum_min_entry_price=0.40, momentum_max_entry_price=0.70), lambda row: row.side == "DOWN" and 0.40 <= row.entry_price <= 0.70),
+        ("edge >= 0.05", _replace_config_values(config, min_edge=0.05), lambda row: (row.edge_at_entry or 0.0) >= 0.05),
+        ("edge >= 0.08", _replace_config_values(config, min_edge=0.08), lambda row: (row.edge_at_entry or 0.0) >= 0.08),
+        ("spread <= 0.01", _replace_config_values(config, max_spread=0.01), lambda row: row.spread is not None and row.spread <= 0.01),
+        ("spread <= 0.005", _replace_config_values(config, max_spread=0.005), lambda row: row.spread is not None and row.spread <= 0.005),
+        ("seconds-to-expiry 60-120", _replace_config_values(config, min_seconds_to_expiry=60, max_seconds_to_expiry=120), lambda row: 60 <= row.seconds_to_expiry <= 120),
+        ("seconds-to-expiry 90-150", _replace_config_values(config, min_seconds_to_expiry=90, max_seconds_to_expiry=150), lambda row: 90 <= row.seconds_to_expiry <= 150),
+        ("seconds-to-expiry 120-180", _replace_config_values(config, min_seconds_to_expiry=120, max_seconds_to_expiry=180), lambda row: 120 <= row.seconds_to_expiry <= 180),
+        ("entry-0.40-0.70 + edge >= 0.05", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70, min_edge=0.05), lambda row: 0.40 <= row.entry_price <= 0.70 and (row.edge_at_entry or 0.0) >= 0.05),
+        ("entry-0.40-0.70 + spread <= 0.01", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70, max_spread=0.01), lambda row: 0.40 <= row.entry_price <= 0.70 and row.spread is not None and row.spread <= 0.01),
+        ("entry-0.40-0.70 + seconds 90-150", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70, min_seconds_to_expiry=90, max_seconds_to_expiry=150), lambda row: 0.40 <= row.entry_price <= 0.70 and 90 <= row.seconds_to_expiry <= 150),
+        ("entry-0.40-0.70 + UP-only", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70, momentum_side_filter="UP"), lambda row: row.side == "UP" and 0.40 <= row.entry_price <= 0.70),
+        ("entry-0.40-0.70 + DOWN-only", _replace_config_values(config, momentum_min_entry_price=0.40, momentum_max_entry_price=0.70, momentum_side_filter="DOWN"), lambda row: row.side == "DOWN" and 0.40 <= row.entry_price <= 0.70),
+    ]
+
+
+def _refresh_strict_variant_session_cache(
+    store: SQLiteStore,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    config_fingerprint: str,
+    base_row,
+    predicate,
+    variant_config: AgentConfig,
+) -> None:
+    run_id = str(base_row["run_id"])
+    _run, signal_rows = load_signal_audit_rows(store, run_id)
+    selected = [row for row in signal_rows if predicate(row)]
+    pnls = [float(row.pnl or 0.0) for row in selected if row.pnl is not None]
+    matched = sum(1 for row in selected if row.side_matched is True)
+    mismatched = sum(1 for row in selected if row.side_matched is False)
+    unknown = sum(1 for row in selected if row.side_matched is None)
+    resolved = matched + mismatched
+    realized = sum(pnls)
+    concentration = _closed_pnl_concentration(pnls)
+    verdicts = conservative_readiness_verdict(
+        closed_trades=len(pnls),
+        realized_pnl=realized,
+        expectancy=(realized / len(pnls)) if pnls else None,
+        pnl_excluding_top_3=concentration["pnl_excluding_top_3"],
+        top_1_trade_pct=concentration["top_1_trade_pct"],
+        side_correctness_rate=(matched / resolved) if resolved else None,
+        max_drawdown=float(base_row["max_drawdown"]) if selected else 0.0,
+        drawdown_limit=variant_config.session_loss_limit_usd,
+    )
+    wins = sum(1 for value in pnls if value > 0)
+    store.upsert_candidate_session_summary(
+        {
+            "candidate_name": candidate_name,
+            "session_id": str(base_row["session_id"]),
+            "run_id": run_id,
+            "source_filter": source_filter,
+            "config_fingerprint": config_fingerprint,
+            "accepted_trades": len(selected),
+            "closed_trades": len(pnls),
+            "realized_pnl": realized,
+            "win_rate": (wins / len(pnls)) if pnls else 0.0,
+            "expectancy": (realized / len(pnls)) if pnls else None,
+            "max_drawdown": float(base_row["max_drawdown"]) if selected else 0.0,
+            "max_exposure": float(base_row["max_exposure"]) if selected else 0.0,
+            "top_1_trade_pct": concentration["top_1_trade_pct"],
+            "pnl_excluding_top_1": concentration["pnl_excluding_top_1"],
+            "pnl_excluding_top_3": concentration["pnl_excluding_top_3"],
+            "settlement_unavailable": sum(1 for row in selected if row.pnl is None),
+            "matched": matched,
+            "mismatched": mismatched,
+            "unknown": unknown,
+            "side_correctness_rate": (matched / resolved) if resolved else None,
+            "warnings": (),
+            "verdicts": verdicts,
+        },
+        datetime.now(timezone.utc),
+    )
+
+
+def _refresh_strict_variant_aggregate_cache(
+    store: SQLiteStore,
+    *,
+    candidate_name: str,
+    source_filter: str,
+    config_fingerprint: str,
+    base_rows,
+    predicate,
+) -> None:
+    selected_rows = []
+    for base_row in base_rows:
+        _run, signal_rows = load_signal_audit_rows(store, str(base_row["run_id"]))
+        selected_rows.extend(row for row in signal_rows if predicate(row))
+    session_rows = store.candidate_session_summary_rows(
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=config_fingerprint,
+    )
+    pnls = [float(row.pnl or 0.0) for row in selected_rows if row.pnl is not None]
+    realized = sum(pnls)
+    closed_trades = len(pnls)
+    wins = sum(1 for value in pnls if value > 0)
+    matched = sum(1 for row in selected_rows if row.side_matched is True)
+    mismatched = sum(1 for row in selected_rows if row.side_matched is False)
+    unknown = sum(1 for row in selected_rows if row.side_matched is None)
+    resolved = matched + mismatched
+    concentration = _closed_pnl_concentration(pnls)
+    expectancy = realized / closed_trades if closed_trades else None
+    verdicts = conservative_readiness_verdict(
+        closed_trades=closed_trades,
+        realized_pnl=realized,
+        expectancy=expectancy,
+        pnl_excluding_top_3=concentration["pnl_excluding_top_3"],
+        top_1_trade_pct=concentration["top_1_trade_pct"],
+        side_correctness_rate=(matched / resolved) if resolved else None,
+        max_drawdown=max((float(row["max_drawdown"]) for row in session_rows), default=0.0),
+        drawdown_limit=None,
+    )
+    progress = {
+        "closed_trades_target": 50,
+        "closed_trades_remaining": max(0, 50 - closed_trades),
+        "side_correctness_target": 0.55,
+        "pnl_excluding_top_3_positive": (concentration["pnl_excluding_top_3"] or 0.0) > 0,
+        "top_1_below_40pct": (
+            concentration["top_1_trade_pct"] is not None and concentration["top_1_trade_pct"] < 0.40
+        ),
+    }
+    store.upsert_candidate_aggregate_summary(
+        {
+            "candidate_name": candidate_name,
+            "source_filter": source_filter,
+            "config_fingerprint": config_fingerprint,
+            "sessions_tested": len(session_rows),
+            "accepted_trades": len(selected_rows),
+            "closed_trades": closed_trades,
+            "realized_pnl": realized,
+            "win_rate": (wins / closed_trades) if closed_trades else 0.0,
+            "expectancy": expectancy,
+            "max_drawdown": max((float(row["max_drawdown"]) for row in session_rows), default=0.0),
+            "max_exposure": max((float(row["max_exposure"]) for row in session_rows), default=0.0),
+            "top_1_trade_pct": concentration["top_1_trade_pct"],
+            "pnl_excluding_top_1": concentration["pnl_excluding_top_1"],
+            "pnl_excluding_top_3": concentration["pnl_excluding_top_3"],
+            "settlement_unavailable": sum(int(row["settlement_unavailable"]) for row in session_rows),
+            "matched": matched,
+            "mismatched": mismatched,
+            "unknown": unknown,
+            "side_correctness_rate": (matched / resolved) if resolved else None,
+            "verdicts": verdicts,
+            "progress": progress,
+        },
+        datetime.now(timezone.utc),
+    )
+
+
+def _build_strict_sweep_text(
+    *,
+    source_filter: str,
+    rows: list[ConservativeAggregateRow],
+    timing: dict[str, float | int],
+) -> str:
+    lines = [
+        "Strict candidate sweep",
+        "Research only: stored public snapshots, paper replay, no execution.",
+        f"Source filter: {source_filter}",
+        _timing_line(timing),
+    ]
+    if not rows:
+        lines.append("No strict variants produced replay results.")
+        return "\n".join(lines)
+    for row in sorted(rows, key=_strict_score, reverse=True):
+        lines.append(_strict_variant_line(row))
+    best = sorted(rows, key=_strict_score, reverse=True)[0]
+    lines.append(f"Best scored variant: {best.label}")
+    lines.append("No new preset added automatically.")
+    return "\n".join(lines)
+
+
+def _build_strict_ranking_text(
+    *,
+    source_filter: str,
+    rows: list[ConservativeAggregateRow],
+    timing: dict[str, float | int],
+) -> str:
+    ranked = sorted(rows, key=_strict_score, reverse=True)
+    rejected_sample = [row for row in rows if row.closed_trades < 30]
+    rejected_side = [row for row in rows if (row.side_correctness_rate or 0.0) < 0.55]
+    rejected_concentration = [
+        row for row in rows if row.top_1_trade_pct is not None and row.top_1_trade_pct >= 0.40
+    ]
+    rejected_expectancy = [row for row in rows if row.expectancy is None or row.expectancy <= 0]
+    recommendation = _recommended_strict_candidate(ranked)
+    lines = [
+        "Strict candidate ranking",
+        "Research only: stored public snapshots, paper replay, no execution.",
+        f"Source filter: {source_filter}",
+        _timing_line(timing),
+        "Top variants overall:",
+    ]
+    for index, row in enumerate(ranked[:10], start=1):
+        lines.append(f"{index}. score={_strict_score(row):.2f} | {_strict_variant_line(row)}")
+    lines.append("Variants rejected due to sample size: " + _labels(rejected_sample))
+    lines.append("Variants rejected due to side correctness: " + _labels(rejected_side))
+    lines.append("Variants rejected due to concentration: " + _labels(rejected_concentration))
+    lines.append("Variants rejected due to negative expectancy: " + _labels(rejected_expectancy))
+    lines.append(f"Recommended next research candidate: {recommendation}")
+    lines.append("No new preset added automatically.")
+    return "\n".join(lines)
+
+
+def _strict_variant_line(row: ConservativeAggregateRow) -> str:
+    profitable_sessions = getattr(row, "profitable_sessions", None)
+    return " | ".join(
+        [
+            row.label,
+            f"accepted={row.accepted_trades}",
+            f"closed={row.closed_trades}",
+            f"realized_pnl={_fmt_money(row.realized_pnl)}",
+            f"win_rate={row.win_rate:.2%}",
+            f"expectancy={_fmt_money(row.expectancy)}",
+            f"max_drawdown={_fmt_money(row.max_drawdown)}",
+            f"max_exposure={_fmt_money(row.max_exposure)}",
+            f"side_correctness={_fmt_pct(row.side_correctness_rate)}",
+            f"top_1={_fmt_pct(row.top_1_trade_pct)}",
+            f"pnl_ex_top_3={_fmt_money(row.pnl_excluding_top_3)}",
+            f"profitable_sessions={profitable_sessions if profitable_sessions is not None else 'n/a'}",
+            f"trend={getattr(row, 'trend', 'n/a')}",
+            f"verdicts={', '.join(row.verdicts)}",
+        ]
+    )
+
+
+def _strict_score(row: ConservativeAggregateRow) -> float:
+    score = 0.0
+    score += min(row.closed_trades, 60) * 0.5
+    score += ((row.side_correctness_rate or 0.0) - 0.50) * 120.0
+    score += (row.expectancy or -1.0) * 8.0
+    if row.pnl_excluding_top_3 is not None and row.pnl_excluding_top_3 > 0:
+        score += 8.0
+    if row.top_1_trade_pct is not None and row.top_1_trade_pct < 0.30:
+        score += 6.0
+    elif row.top_1_trade_pct is not None and row.top_1_trade_pct < 0.40:
+        score += 3.0
+    score -= row.max_drawdown * 0.5
+    if row.closed_trades < 30:
+        score -= 20.0
+    if (row.side_correctness_rate or 0.0) < 0.55:
+        score -= 15.0
+    if row.expectancy is None or row.expectancy <= 0:
+        score -= 20.0
+    if row.pnl_excluding_top_3 is not None and row.pnl_excluding_top_3 <= 0:
+        score -= 10.0
+    if row.top_1_trade_pct is not None and row.top_1_trade_pct >= 0.40:
+        score -= 10.0
+    if "TAIL_RISK_DOMINATED" in row.verdicts:
+        score -= 8.0
+    if "DIRECTIONAL_SIGNAL_FAILED" in row.verdicts:
+        score -= 8.0
+    if getattr(row, "trend", "") == "degrading":
+        score -= 10.0
+    if getattr(row, "trend", "") == "improving":
+        score += 5.0
+    return score
+
+
+def _recommended_strict_candidate(rows: list[ConservativeAggregateRow]) -> str:
+    for row in rows:
+        if (
+            row.closed_trades >= 30
+            and (row.side_correctness_rate or 0.0) >= 0.58
+            and (row.expectancy or 0.0) > 0
+            and (row.pnl_excluding_top_3 or 0.0) > 0
+            and (row.top_1_trade_pct is None or row.top_1_trade_pct < 0.40)
+            and "TAIL_RISK_DOMINATED" not in row.verdicts
+        ):
+            return row.label
+    return "none - no strict variant clears the research quality bar"
+
+
+def _outsample_variant_rows(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str,
+    candidate_name: str,
+    cutoff: datetime,
+) -> tuple[list[dict], list]:
+    base_config = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, candidate_name), "momentum"),
+        "approximate-expiry",
+    )
+    base_fingerprint = _candidate_config_fingerprint(base_config)
+    base_rows = store.candidate_session_summary_rows(
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=base_fingerprint,
+    )
+    if not base_rows:
+        return [], []
+    sorted_rows = sorted(
+        base_rows,
+        key=lambda row: _session_started_at(store, str(row["session_id"]))
+        or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    cohorts = {
+        "in-sample": [
+            row
+            for row in sorted_rows
+            if (_session_started_at(store, str(row["session_id"])) or datetime.min.replace(tzinfo=timezone.utc)) < cutoff
+        ],
+        "out-of-sample": [
+            row
+            for row in sorted_rows
+            if (_session_started_at(store, str(row["session_id"])) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+        ],
+        "all": sorted_rows,
+    }
+    output = []
+    for label, predicate in _frozen_outsample_variants():
+        output.append(
+            {
+                "label": label,
+                "cohorts": {
+                    cohort_name: _outsample_metrics_for_rows(store, cohort_rows, predicate)
+                    for cohort_name, cohort_rows in cohorts.items()
+                },
+            }
+        )
+    return output, sorted_rows
+
+
+def _frozen_outsample_variants() -> list[tuple[str, object]]:
+    return [
+        ("base conservative-entry-30-70", lambda row: True),
+        ("expiry-90-150", lambda row: 90 <= row.seconds_to_expiry <= 150),
+        ("UP-only entry-0.40-0.70", lambda row: row.side == "UP" and 0.40 <= row.entry_price <= 0.70),
+        ("entry-0.40-0.50", lambda row: 0.40 <= row.entry_price < 0.50),
+        ("entry-0.40-0.70", lambda row: 0.40 <= row.entry_price <= 0.70),
+        (
+            "near-flat pre-entry BTC move",
+            lambda row: row.pre_entry_exchange_move is not None and -0.00025 <= row.pre_entry_exchange_move <= 0.00025,
+        ),
+        (
+            "entry-0.40-0.70 + expiry-90-150",
+            lambda row: 0.40 <= row.entry_price <= 0.70 and 90 <= row.seconds_to_expiry <= 150,
+        ),
+        (
+            "UP-only entry-0.40-0.70 + expiry-90-150",
+            lambda row: row.side == "UP" and 0.40 <= row.entry_price <= 0.70 and 90 <= row.seconds_to_expiry <= 150,
+        ),
+    ]
+
+
+def _outsample_metrics_for_rows(store: SQLiteStore, base_rows, predicate) -> dict:
+    selected_rows = []
+    session_metrics: list[ConservativeSessionRow] = []
+    for base_row in base_rows:
+        _run, signal_rows = load_signal_audit_rows(store, str(base_row["run_id"]))
+        selected = [row for row in signal_rows if predicate(row)]
+        selected_rows.extend(selected)
+        session_metrics.append(
+            _outsample_session_metric(
+                session_id=str(base_row["session_id"]),
+                selected=selected,
+                base_row=base_row,
+            )
+        )
+    pnls = [float(row.pnl or 0.0) for row in selected_rows if row.pnl is not None]
+    realized = sum(pnls)
+    closed = len(pnls)
+    wins = sum(1 for value in pnls if value > 0)
+    matched = sum(1 for row in selected_rows if row.side_matched is True)
+    mismatched = sum(1 for row in selected_rows if row.side_matched is False)
+    unknown = sum(1 for row in selected_rows if row.side_matched is None)
+    resolved = matched + mismatched
+    concentration = _closed_pnl_concentration(pnls)
+    profitable_sessions = sum(1 for row in session_metrics if row.realized_pnl > 0)
+    losing_sessions = sum(1 for row in session_metrics if row.realized_pnl < 0)
+    sessions_with_closed = sum(1 for row in session_metrics if row.closed_trades > 0)
+    trend = _candidate_trend(session_metrics)
+    metrics = {
+        "sessions_tested": len(base_rows),
+        "accepted_trades": len(selected_rows),
+        "closed_trades": closed,
+        "realized_pnl": realized,
+        "win_rate": (wins / closed) if closed else 0.0,
+        "expectancy": (realized / closed) if closed else None,
+        "max_drawdown": max((row.max_drawdown for row in session_metrics), default=0.0),
+        "max_exposure": max((row.max_exposure for row in session_metrics), default=0.0),
+        "top_1_trade_pct": concentration["top_1_trade_pct"],
+        "pnl_excluding_top_1": concentration["pnl_excluding_top_1"],
+        "pnl_excluding_top_3": concentration["pnl_excluding_top_3"],
+        "settlement_unavailable": sum(1 for row in selected_rows if row.pnl is None),
+        "matched": matched,
+        "mismatched": mismatched,
+        "unknown": unknown,
+        "side_correctness_rate": (matched / resolved) if resolved else None,
+        "profitable_sessions": profitable_sessions,
+        "losing_sessions": losing_sessions,
+        "sessions_with_closed": sessions_with_closed,
+        "trend": trend,
+    }
+    metrics["verdicts"] = _outsample_verdict(metrics)
+    return metrics
+
+
+def _outsample_session_metric(*, session_id: str, selected: list, base_row) -> ConservativeSessionRow:
+    pnls = [float(row.pnl or 0.0) for row in selected if row.pnl is not None]
+    realized = sum(pnls)
+    closed = len(pnls)
+    wins = sum(1 for value in pnls if value > 0)
+    matched = sum(1 for row in selected if row.side_matched is True)
+    mismatched = sum(1 for row in selected if row.side_matched is False)
+    unknown = sum(1 for row in selected if row.side_matched is None)
+    resolved = matched + mismatched
+    concentration = _closed_pnl_concentration(pnls)
+    return ConservativeSessionRow(
+        session_id=session_id,
+        accepted_trades=len(selected),
+        closed_trades=closed,
+        realized_pnl=realized,
+        win_rate=(wins / closed) if closed else 0.0,
+        expectancy=(realized / closed) if closed else None,
+        max_drawdown=float(base_row["max_drawdown"]) if selected else 0.0,
+        max_exposure=float(base_row["max_exposure"]) if selected else 0.0,
+        top_1_trade_pct=concentration["top_1_trade_pct"],
+        pnl_excluding_top_1=concentration["pnl_excluding_top_1"],
+        pnl_excluding_top_3=concentration["pnl_excluding_top_3"],
+        settlement_unavailable=sum(1 for row in selected if row.pnl is None),
+        matched=matched,
+        mismatched=mismatched,
+        unknown=unknown,
+        side_correctness_rate=(matched / resolved) if resolved else None,
+        warnings=(),
+        verdicts=(),
+    )
+
+
+def _outsample_verdict(metrics: dict) -> tuple[str, ...]:
+    profitable_rate = (
+        metrics["profitable_sessions"] / metrics["sessions_with_closed"]
+        if metrics["sessions_with_closed"]
+        else 0.0
+    )
+    failures: list[str] = []
+    if int(metrics["closed_trades"]) < 30:
+        failures.append("NEEDS_MORE_OUTSAMPLE_DATA")
+    if (metrics["side_correctness_rate"] or 0.0) < 0.58:
+        failures.append("OUTSAMPLE_FAILED_SIDE_CORRECTNESS")
+    if metrics["expectancy"] is None or metrics["expectancy"] <= 0:
+        failures.append("OUTSAMPLE_NEGATIVE_EXPECTANCY")
+    if (
+        metrics["pnl_excluding_top_3"] is None
+        or metrics["pnl_excluding_top_3"] <= 0
+        or (metrics["top_1_trade_pct"] is not None and metrics["top_1_trade_pct"] >= 0.40)
+    ):
+        failures.append("OUTSAMPLE_TAIL_RISK")
+    if metrics["trend"] == "degrading" or profitable_rate < 0.60:
+        failures.append("OUTSAMPLE_DEGRADING")
+    return ("OUTSAMPLE_PROMISING",) if not failures else tuple(dict.fromkeys(failures))
+
+
+def _build_outsample_report_text(
+    *,
+    source_filter: str,
+    candidate_name: str,
+    cutoff: datetime,
+    rows: list[dict],
+) -> str:
+    lines = [
+        "Out-of-sample report",
+        "Research only: frozen paper variants, cached runs, stored snapshots, no execution.",
+        f"Source filter: {source_filter}",
+        f"Candidate: {candidate_name}",
+        f"Cutoff: {cutoff.isoformat()}",
+        "Frozen variants: " + ", ".join(label for label, _predicate in _frozen_outsample_variants()),
+    ]
+    if not rows:
+        lines.append("Candidate cache is incomplete. Run validate-candidate first.")
+        return "\n".join(lines)
+    for item in rows:
+        lines.append(f"Variant: {item['label']}")
+        for cohort_name in ("in-sample", "out-of-sample", "all"):
+            lines.append("  " + _outsample_metric_line(cohort_name, item["cohorts"][cohort_name]))
+    promising = [
+        item["label"]
+        for item in rows
+        if "OUTSAMPLE_PROMISING" in item["cohorts"]["out-of-sample"]["verdicts"]
+    ]
+    lines.append("Out-of-sample promising variants: " + (", ".join(promising) if promising else "none"))
+    return "\n".join(lines)
+
+
+def _outsample_metric_line(label: str, metrics: dict) -> str:
+    return " | ".join(
+        [
+            label,
+            f"sessions={metrics['sessions_tested']}",
+            f"accepted={metrics['accepted_trades']}",
+            f"closed={metrics['closed_trades']}",
+            f"realized_pnl={_fmt_money(metrics['realized_pnl'])}",
+            f"win_rate={float(metrics['win_rate']):.2%}",
+            f"expectancy={_fmt_money(metrics['expectancy'])}",
+            f"side_correctness={_fmt_pct(metrics['side_correctness_rate'])}",
+            f"top_1={_fmt_pct(metrics['top_1_trade_pct'])}",
+            f"pnl_ex_top_3={_fmt_money(metrics['pnl_excluding_top_3'])}",
+            f"max_drawdown={_fmt_money(metrics['max_drawdown'])}",
+            f"max_exposure={_fmt_money(metrics['max_exposure'])}",
+            f"profitable_sessions={metrics['profitable_sessions']}",
+            f"losing_sessions={metrics['losing_sessions']}",
+            f"trend={metrics['trend']}",
+            f"verdicts={', '.join(metrics['verdicts'])}",
+        ]
+    )
+
+
+def _build_validation_target_text(
+    store: SQLiteStore,
+    *,
+    source_filter: str,
+    candidate_name: str,
+    cutoff: datetime,
+    rows: list[dict],
+    base_rows,
+) -> str:
+    out_rows = [
+        row
+        for row in base_rows
+        if (_session_started_at(store, str(row["session_id"])) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+    ]
+    out_duration_hours = sum(_session_duration_hours(store, str(row["session_id"])) for row in out_rows)
+    lines = [
+        "Validation target",
+        "Research only: estimates use stored out-of-sample sessions and frozen paper variants.",
+        f"Source filter: {source_filter}",
+        f"Candidate: {candidate_name}",
+        f"Cutoff: {cutoff.isoformat()}",
+        f"Out-of-sample sessions: {len(out_rows)}",
+        f"Out-of-sample observed hours: {out_duration_hours:.2f}",
+    ]
+    if not rows:
+        lines.append("Candidate cache is incomplete. Run validate-candidate first.")
+        return "\n".join(lines)
+    for item in rows:
+        metrics = item["cohorts"]["out-of-sample"]
+        remaining = max(0, 30 - int(metrics["closed_trades"]))
+        rate = (int(metrics["closed_trades"]) / out_duration_hours) if out_duration_hours > 0 else 0.0
+        hours_needed = (remaining / rate) if rate > 0 and remaining > 0 else None
+        lines.append(
+            " | ".join(
+                [
+                    item["label"],
+                    f"oos_closed={metrics['closed_trades']}",
+                    f"closed_needed_for_30={remaining}",
+                    f"closed_per_observed_hour={rate:.2f}",
+                    f"estimated_more_hours={hours_needed:.2f}" if hours_needed is not None else "estimated_more_hours=n/a",
+                ]
+            )
+        )
+    lines.append("More data is needed for any variant with fewer than 30 out-of-sample closed trades.")
+    return "\n".join(lines)
+
+
+def _session_duration_hours(store: SQLiteStore, session_id: str) -> float:
+    row = store.research_session_by_id(session_id)
+    if row is None:
+        return 0.0
+    duration = _maybe_float(row["duration_seconds"])
+    if duration is not None and duration > 0:
+        return duration / 3600.0
+    started = _parse_since(str(row["started_at"])) if row["started_at"] else None
+    ended = _parse_since(str(row["ended_at"])) if row["ended_at"] else None
+    if started is None or ended is None:
+        return 0.0
+    return max(0.0, (ended - started).total_seconds() / 3600.0)
+
+
+def _candidate_signal_rows(store: SQLiteStore, run_ids: list[str]) -> list:
+    rows = []
+    for run_id in run_ids:
+        _run, signal_rows = load_signal_audit_rows(store, run_id)
+        rows.extend(signal_rows)
+    return rows
+
+
+def _feature_breakdown_lines(rows: list) -> list[str]:
+    if not rows:
+        return ["No accepted-trade signal rows found."]
+    specs = [
+        ("side", lambda row: row.side),
+        ("entry price", lambda row: _degradation_entry_bucket(row.entry_price)),
+        ("seconds-to-expiry", lambda row: _degradation_seconds_bucket(row.seconds_to_expiry)),
+        ("spread", lambda row: _degradation_spread_bucket(row.spread)),
+        ("edge", lambda row: _degradation_edge_bucket(row.edge_at_entry)),
+        ("entry source", lambda _row: "unknown"),
+        ("time-of-day UTC", lambda row: _utc_time_bucket(row.entry_timestamp.hour)),
+        ("pre-entry BTC move", lambda row: _degradation_move_bucket(row.pre_entry_exchange_move)),
+        ("post-entry BTC move", lambda row: _degradation_move_bucket(row.post_entry_exchange_move)),
+    ]
+    output: list[str] = []
+    for name, bucket_fn in specs:
+        output.append(f"{name}:")
+        grouped: dict[str, list] = defaultdict(list)
+        for row in rows:
+            grouped[bucket_fn(row)].append(row)
+        for bucket, bucket_rows in sorted(grouped.items()):
+            output.append("  " + _feature_bucket_line(bucket, bucket_rows))
+    return output
+
+
+def _feature_bucket_line(label: str, rows: list) -> str:
+    closed = [row for row in rows if row.pnl is not None]
+    pnls = [float(row.pnl or 0.0) for row in closed]
+    matched = sum(1 for row in rows if row.side_matched is True)
+    mismatched = sum(1 for row in rows if row.side_matched is False)
+    unknown = sum(1 for row in rows if row.side_matched is None)
+    resolved = matched + mismatched
+    concentration = _closed_pnl_concentration(pnls)
+    realized = sum(pnls)
+    return (
+        f"{label} | accepted={len(rows)} | closed={len(closed)} | matched={matched} | "
+        f"mismatched={mismatched} | unknown={unknown} | side_correctness={_fmt_pct((matched / resolved) if resolved else None)} | "
+        f"realized_pnl={_fmt_money(realized)} | expectancy={_fmt_money((realized / len(closed)) if closed else None)} | "
+        f"pnl_ex_top_1={_fmt_money(concentration['pnl_excluding_top_1'])} | "
+        f"pnl_ex_top_3={_fmt_money(concentration['pnl_excluding_top_3'])}"
+    )
+
+
+def _candidate_session_group_line(label: str, rows: list[ConservativeSessionRow]) -> str:
+    if not rows:
+        return f"{label}: none"
+    closed = sum(row.closed_trades for row in rows)
+    realized = sum(row.realized_pnl for row in rows)
+    matched = sum(row.matched for row in rows)
+    mismatched = sum(row.mismatched for row in rows)
+    resolved = matched + mismatched
+    return (
+        f"{label}: sessions={len(rows)} | closed={closed} | realized_pnl={_fmt_money(realized)} | "
+        f"expectancy={_fmt_money((realized / closed) if closed else None)} | "
+        f"side_correctness={_fmt_pct((matched / resolved) if resolved else None)}"
+    )
+
+
+def _candidate_group_line(label: str, rows: list[ConservativeAggregateRow]) -> str:
+    if not rows:
+        return f"{label}: none"
+    row = rows[0]
+    return _strict_variant_line(row)
+
+
+def _session_started_at(store: SQLiteStore, session_id: str) -> datetime | None:
+    session = store.research_session_by_id(session_id)
+    if session is None:
+        return None
+    return _parse_since(str(session["started_at"]))
+
+
+def _candidate_trend(rows: list[ConservativeSessionRow]) -> str:
+    if len(rows) < 3:
+        return "insufficient data"
+    midpoint = len(rows) // 2
+    early = rows[:midpoint]
+    recent = rows[midpoint:]
+    early_expectancy = _average_optional([row.expectancy for row in early])
+    recent_expectancy = _average_optional([row.expectancy for row in recent])
+    early_side = _average_optional([row.side_correctness_rate for row in early])
+    recent_side = _average_optional([row.side_correctness_rate for row in recent])
+    if recent_expectancy is None or early_expectancy is None:
+        return "mixed"
+    if recent_expectancy > early_expectancy and (recent_side or 0.0) >= (early_side or 0.0):
+        return "improving"
+    if recent_expectancy < early_expectancy and (recent_side or 0.0) <= (early_side or 0.0):
+        return "degrading"
+    return "mixed"
+
+
+def _average_optional(values: list[float | None]) -> float | None:
+    clean = [float(value) for value in values if value is not None]
+    return sum(clean) / len(clean) if clean else None
+
+
+def _labels(rows: list[ConservativeAggregateRow]) -> str:
+    return ", ".join(row.label for row in rows) if rows else "none"
+
+
+def _timing_line(timing: dict[str, float | int]) -> str:
+    return (
+        "Timing: "
+        f"sessions_scanned={timing.get('sessions_scanned', 0)}; "
+        f"variants_tested={timing.get('variants_tested', 0)}; "
+        f"runs_reused={timing.get('runs_reused', 0)}; "
+        f"runs_created={timing.get('runs_created', 0)}; "
+        f"summaries_reused={timing.get('summaries_reused', 0)}; "
+        f"summaries_refreshed={timing.get('summaries_refreshed', 0)}; "
+        f"elapsed_seconds={float(timing.get('elapsed_seconds', 0.0)):.2f}"
+    )
+
+
+def _degradation_entry_bucket(value: float) -> str:
+    if value < 0.40:
+        return "0.30-0.40"
+    if value < 0.50:
+        return "0.40-0.50"
+    if value < 0.60:
+        return "0.50-0.60"
+    return "0.60-0.70"
+
+
+def _degradation_seconds_bucket(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 90:
+        return "60-90"
+    if value < 120:
+        return "90-120"
+    if value < 150:
+        return "120-150"
+    return "150-180"
+
+
+def _degradation_spread_bucket(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value <= 0.005:
+        return "<=0.005"
+    if value <= 0.01:
+        return "0.005-0.01"
+    return "0.01-0.02"
+
+
+def _degradation_edge_bucket(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value < 0.05:
+        return "0.03-0.05"
+    if value < 0.08:
+        return "0.05-0.08"
+    if value < 0.12:
+        return "0.08-0.12"
+    return ">0.12"
+
+
+def _degradation_move_bucket(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    if value <= -0.001:
+        return "<=-0.10%"
+    if value < -0.00025:
+        return "-0.10% to -0.025%"
+    if value <= 0.00025:
+        return "-0.025% to 0.025%"
+    if value < 0.001:
+        return "0.025% to 0.10%"
+    return ">=0.10%"
+
+
+def _utc_time_bucket(hour: int) -> str:
+    if hour < 6:
+        return "00-06"
+    if hour < 12:
+        return "06-12"
+    if hour < 18:
+        return "12-18"
+    return "18-24"
+
+
 def _aggregate_correctness_breakdowns(session_payloads: list[dict], key: str) -> dict[str, dict[str, float | int | None]]:
     merged: dict[str, dict[str, int]] = {}
     for payload in session_payloads:
@@ -3730,6 +4988,22 @@ def _observe_profile_settings(profile: str | None) -> dict[str, object]:
     }
 
 
+def _normalize_public_price_snapshot(
+    snapshot: PriceSnapshot,
+    collected_at: datetime,
+    max_skew_seconds: int = 300,
+) -> PriceSnapshot:
+    delta = abs((snapshot.timestamp.astimezone(timezone.utc) - collected_at.astimezone(timezone.utc)).total_seconds())
+    if delta <= max_skew_seconds:
+        return snapshot
+    return PriceSnapshot(
+        asset=snapshot.asset,
+        price=snapshot.price,
+        timestamp=collected_at.astimezone(timezone.utc),
+        source=snapshot.source,
+    )
+
+
 def _collect_public_prices(exchange, assets: tuple[Asset, ...]) -> list[PriceSnapshot]:
     if hasattr(exchange, "latest_price"):
         return [exchange.latest_price(asset) for asset in assets]
@@ -3973,6 +5247,15 @@ def _fmt_money(value) -> str:
     if value is None:
         return "n/a"
     return f"${float(value):.2f}"
+
+
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "n/a"
+    numeric = float(value)
+    if math.isnan(numeric):
+        return "n/a"
+    return f"{numeric:.2%}"
 
 
 def _clean_source_filter(value: str | None) -> str | None:

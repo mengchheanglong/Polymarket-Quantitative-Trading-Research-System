@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from src.main import main
 from src.models import Asset, PriceSnapshot
 from src.storage.sqlite import SQLiteStore
+from tests.test_lifecycle_close_modes import _seed_session_dataset
 
 
 def _log_public_price_only(db_path):
@@ -116,6 +117,25 @@ def test_public_readiness_insufficient_data(tmp_path, capsys):
 
     stdout = capsys.readouterr().out
     assert "Verdict: NO_PUBLIC_CRYPTO_MARKETS" in stdout
+
+
+def test_focused_public_readiness_still_fails_when_btc_prices_are_truly_missing(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    session_id = _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    store = SQLiteStore(db_path)
+    try:
+        store.conn.execute("DELETE FROM price_snapshots WHERE session_id = ?", (session_id,))
+        store.conn.execute(
+            "DELETE FROM raw_snapshots WHERE session_id = ? AND snapshot_type = 'exchange_price'",
+            (session_id,),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+
+    assert main(["--db", str(db_path), "readiness", "--source", "public", "--session-id", session_id]) == 0
+    stdout = capsys.readouterr().out
+    assert "Verdict: MISSING_EXCHANGE_PRICES" in stdout
 
 
 def test_market_discovery_audit_output(tmp_path, capsys):

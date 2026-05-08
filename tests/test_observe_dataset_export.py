@@ -21,6 +21,16 @@ class FakeExchange:
         ]
 
 
+class DualSourceBtcExchange(FakeExchange):
+    def collect_prices(self):
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return [
+            PriceSnapshot(Asset.BTC, 100_000.0, now, "coinbase:BTC-USD"),
+            PriceSnapshot(Asset.BTC, 100_010.0, now, "kraken:XBTUSD"),
+            PriceSnapshot(Asset.ETH, 2_000.0, now, "kraken:ETHUSD"),
+        ]
+
+
 class FakePolymarket:
     def __init__(self, *_args, **_kwargs):
         pass
@@ -400,3 +410,42 @@ def test_observe_conservative_entry_profile_collects_btc_only(tmp_path, monkeypa
     report_out = capsys.readouterr().out
     assert "Observe profile: conservative-entry-30-70" in report_out
     assert "Assets observed: BTC" in report_out
+
+
+def test_observe_conservative_entry_profile_collects_btc_from_both_public_sources(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper.sqlite3"
+    monkeypatch.setattr("src.main.FallbackExchangeCollector", lambda _collectors: DualSourceBtcExchange())
+    monkeypatch.setattr("src.main.PolymarketPublicCollector", FocusedFakePolymarket)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "observe",
+            "--profile",
+            "conservative-entry-30-70",
+            "--cycles",
+            "1",
+            "--interval-seconds",
+            "0",
+        ]
+    ) == 0
+
+    store = SQLiteStore(db_path)
+    try:
+        session_id = str(store.latest_research_session()["session_id"])
+        rows = store.rows(
+            "SELECT source, asset, COUNT(*) AS count FROM price_snapshots WHERE session_id = ? GROUP BY source, asset ORDER BY source, asset",
+            (session_id,),
+        )
+        assert {(str(row["source"]), str(row["asset"])) for row in rows} == {
+            ("coinbase:BTC-USD", "BTC"),
+            ("kraken:XBTUSD", "BTC"),
+        }
+        readiness = store.readiness(source_filter="public", session_id=session_id)
+        quality = store.data_quality_metrics(source_filter="public", session_id=session_id)
+        assert readiness["verdict"] == "READY_FOR_PUBLIC_REPLAY"
+        assert quality["missing_prices"] == 0
+        assert quality["stale_exchange_prices"] == 0
+    finally:
+        store.close()

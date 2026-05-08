@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from src.config import AgentConfig
-from src.main import _apply_named_preset, main
-from src.reports.conservative_report import conservative_readiness_verdict
+from src.main import (
+    _apply_named_preset,
+    _feature_breakdown_lines,
+    _frozen_outsample_variants,
+    _outsample_verdict,
+    _strict_candidate_variants,
+    _strict_score,
+    main,
+)
+from src.reports.conservative_report import ConservativeAggregateRow, conservative_readiness_verdict
 from src.storage.sqlite import SQLiteStore
 from tests.test_lifecycle_close_modes import _seed_session_dataset
 
@@ -383,3 +393,362 @@ def test_validation_export_package(tmp_path):
         "conservative_report_summary.csv",
     }
     assert expected.issubset({path.name for path in out_dir.glob("*.csv")})
+
+
+def test_degradation_audit_and_feature_breakdown_output(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.30, include_settlement=True)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "degradation-audit",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Degradation audit" in output
+    assert "Matched vs mismatched feature breakdown:" in output
+    assert "Performance trend:" in output
+
+
+def test_matched_vs_mismatched_feature_breakdown_buckets():
+    rows = [
+        SimpleNamespace(
+            side="UP",
+            entry_price=0.45,
+            seconds_to_expiry=100,
+            spread=0.008,
+            edge_at_entry=0.06,
+            entry_timestamp=SimpleNamespace(hour=7),
+            pre_entry_exchange_move=0.0001,
+            post_entry_exchange_move=0.0005,
+            side_matched=True,
+            pnl=1.2,
+        ),
+        SimpleNamespace(
+            side="DOWN",
+            entry_price=0.35,
+            seconds_to_expiry=160,
+            spread=0.015,
+            edge_at_entry=0.10,
+            entry_timestamp=SimpleNamespace(hour=15),
+            pre_entry_exchange_move=-0.0005,
+            post_entry_exchange_move=-0.0005,
+            side_matched=False,
+            pnl=-1.0,
+        ),
+    ]
+    output = "\n".join(_feature_breakdown_lines(rows))
+    assert "entry price:" in output
+    assert "0.30-0.40" in output
+    assert "0.40-0.50" in output
+    assert "seconds-to-expiry:" in output
+    assert "spread:" in output
+    assert "edge:" in output
+
+
+def test_strict_candidate_sweep_and_ranking_use_cache(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    store = SQLiteStore(db_path)
+    try:
+        raw_count = store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"]
+    finally:
+        store.close()
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "strict-candidate-sweep",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    sweep_output = capsys.readouterr().out
+    assert "Strict candidate sweep" in sweep_output
+    assert "base conservative-entry-30-70" in sweep_output
+    assert "entry-0.40-0.70" in sweep_output
+    assert "No new preset added automatically." in sweep_output
+
+    assert main(["--db", str(db_path), "strict-candidate-ranking", "--source", "public"]) == 0
+    ranking_output = capsys.readouterr().out
+    assert "Strict candidate ranking" in ranking_output
+    assert "Top variants overall:" in ranking_output
+    assert "Recommended next research candidate:" in ranking_output
+
+    assert main(["--db", str(db_path), "strict-candidate-ranking", "--source", "public"]) == 0
+    cached_output = capsys.readouterr().out
+    assert "summaries_reused=" in cached_output
+
+    assert main(["--db", str(db_path), "strict-candidate-ranking", "--source", "public", "--refresh"]) == 0
+    refreshed_output = capsys.readouterr().out
+    assert "summaries_refreshed=" in refreshed_output
+
+    store = SQLiteStore(db_path)
+    try:
+        assert store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"] == raw_count
+    finally:
+        store.close()
+
+
+def test_strict_variant_filter_predicates():
+    config = _apply_named_preset(AgentConfig(), "conservative-entry-30-70")
+    variants = {label: predicate for label, _variant_config, predicate in _strict_candidate_variants(config)}
+    row = SimpleNamespace(entry_price=0.45, side="UP", edge_at_entry=0.06, spread=0.008, seconds_to_expiry=100)
+    assert variants["entry-0.40-0.70"](row)
+    assert variants["UP-only"](row)
+    assert not variants["DOWN-only"](row)
+    assert variants["edge >= 0.05"](row)
+    assert not variants["edge >= 0.08"](row)
+    assert variants["spread <= 0.01"](row)
+    assert not variants["spread <= 0.005"](row)
+    assert variants["seconds-to-expiry 90-150"](row)
+    assert variants["entry-0.40-0.70 + edge >= 0.05"](row)
+
+
+def test_strict_ranking_penalizes_side_correctness_and_tail_risk():
+    strong = ConservativeAggregateRow(
+        label="strong",
+        sessions_tested=5,
+        accepted_trades=40,
+        closed_trades=35,
+        realized_pnl=12.0,
+        win_rate=0.60,
+        expectancy=0.34,
+        max_drawdown=1.0,
+        max_exposure=1.0,
+        top_1_trade_pct=0.20,
+        pnl_excluding_top_1=9.0,
+        pnl_excluding_top_3=5.0,
+        settlement_unavailable=0,
+        matched=21,
+        mismatched=14,
+        unknown=0,
+        side_correctness_rate=0.60,
+        warnings=(),
+        verdicts=("NEEDS_MORE_DATA",),
+    )
+    weak_side = ConservativeAggregateRow(
+        **{**strong.__dict__, "label": "weak_side", "side_correctness_rate": 0.48, "matched": 17, "mismatched": 18}
+    )
+    tail_risk = ConservativeAggregateRow(
+        **{
+            **strong.__dict__,
+            "label": "tail_risk",
+            "top_1_trade_pct": 0.75,
+            "pnl_excluding_top_3": -1.0,
+            "verdicts": ("TAIL_RISK_DOMINATED",),
+        }
+    )
+    assert _strict_score(strong) > _strict_score(weak_side)
+    assert _strict_score(strong) > _strict_score(tail_risk)
+
+
+def test_outsample_report_splits_sessions_by_cutoff(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    first = _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    second = _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    store = SQLiteStore(db_path)
+    try:
+        store.conn.execute(
+            "UPDATE research_sessions SET started_at = ?, ended_at = ? WHERE session_id = ?",
+            ("2026-01-01T10:00:00+00:00", "2026-01-01T11:00:00+00:00", first),
+        )
+        store.conn.execute(
+            "UPDATE research_sessions SET started_at = ?, ended_at = ? WHERE session_id = ?",
+            ("2026-01-02T10:00:00+00:00", "2026-01-02T11:00:00+00:00", second),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "outsample-report",
+            "--source",
+            "public",
+            "--since",
+            "2026-01-02T00:00:00Z",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Out-of-sample report" in output
+    assert "Frozen variants:" in output
+    assert "in-sample | sessions=1" in output
+    assert "out-of-sample | sessions=1" in output
+    assert "Out-of-sample promising variants:" in output
+
+
+def test_frozen_outsample_variants_are_stable():
+    labels = [label for label, _predicate in _frozen_outsample_variants()]
+    assert labels == [
+        "base conservative-entry-30-70",
+        "expiry-90-150",
+        "UP-only entry-0.40-0.70",
+        "entry-0.40-0.50",
+        "entry-0.40-0.70",
+        "near-flat pre-entry BTC move",
+        "entry-0.40-0.70 + expiry-90-150",
+        "UP-only entry-0.40-0.70 + expiry-90-150",
+    ]
+    row = SimpleNamespace(
+        side="UP",
+        entry_price=0.45,
+        seconds_to_expiry=100,
+        pre_entry_exchange_move=0.0001,
+    )
+    predicates = dict(_frozen_outsample_variants())
+    assert predicates["expiry-90-150"](row)
+    assert predicates["UP-only entry-0.40-0.70"](row)
+    assert predicates["entry-0.40-0.50"](row)
+    assert predicates["near-flat pre-entry BTC move"](row)
+
+
+def test_outsample_promotion_gate_requires_sample_side_and_tail_quality():
+    promising = {
+        "closed_trades": 35,
+        "side_correctness_rate": 0.60,
+        "expectancy": 0.20,
+        "pnl_excluding_top_3": 5.0,
+        "top_1_trade_pct": 0.25,
+        "trend": "mixed",
+        "profitable_sessions": 6,
+        "sessions_with_closed": 10,
+    }
+    assert _outsample_verdict(promising) == ("OUTSAMPLE_PROMISING",)
+
+    low_sample = {**promising, "closed_trades": 29}
+    assert "NEEDS_MORE_OUTSAMPLE_DATA" in _outsample_verdict(low_sample)
+
+    weak_side = {**promising, "side_correctness_rate": 0.55}
+    assert "OUTSAMPLE_FAILED_SIDE_CORRECTNESS" in _outsample_verdict(weak_side)
+
+    tail_risk = {**promising, "top_1_trade_pct": 0.55}
+    assert "OUTSAMPLE_TAIL_RISK" in _outsample_verdict(tail_risk)
+
+
+def test_validation_target_output_and_no_raw_deletion(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    session_id = _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    store = SQLiteStore(db_path)
+    try:
+        raw_before = store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"]
+    finally:
+        store.close()
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    store = SQLiteStore(db_path)
+    try:
+        store.conn.execute(
+            "UPDATE research_sessions SET started_at = ?, ended_at = ?, duration_seconds = ? WHERE session_id = ?",
+            ("2026-01-02T10:00:00+00:00", "2026-01-02T11:00:00+00:00", 3600.0, session_id),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validation-target",
+            "--source",
+            "public",
+            "--since",
+            "2026-01-02T00:00:00Z",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "Validation target" in output
+    assert "closed_needed_for_30=" in output
+    assert "estimated_more_hours=" in output
+
+    store = SQLiteStore(db_path)
+    try:
+        assert store.rows("SELECT COUNT(*) AS count FROM raw_snapshots")[0]["count"] == raw_before
+    finally:
+        store.close()
+
+
+def test_validate_candidate_explains_missing_exchange_price_sessions(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    session_id = _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    store = SQLiteStore(db_path)
+    try:
+        store.conn.execute("DELETE FROM price_snapshots WHERE session_id = ?", (session_id,))
+        store.conn.execute(
+            "DELETE FROM raw_snapshots WHERE session_id = ? AND snapshot_type = 'exchange_price'",
+            (session_id,),
+        )
+        store.conn.commit()
+    finally:
+        store.close()
+
+    assert main(
+        [
+            "--db",
+            str(db_path),
+            "validate-candidate",
+            "--candidate",
+            "conservative-entry-30-70",
+            "--source",
+            "public",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert f"{session_id} | reason=MISSING_EXCHANGE_PRICES" in output
+    assert "exchange_price_snapshots=0" in output
+    assert "stale_exchange_prices=" in output

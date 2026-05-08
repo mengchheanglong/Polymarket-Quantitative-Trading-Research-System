@@ -24,6 +24,8 @@ These are design references only. They do not authorize live trading, wallet sup
 - Also useful for: directional audit workflows where one paper branch is treated as a hypothesis to falsify, including reverse-signal tests, side-correctness breakdowns, and ranking stricter paper variants by skepticism metrics rather than just raw PnL.
 - Also useful for: long-running dry-run session ergonomics, including progress metrics, wall-clock bounded collection loops, and avoiding duplicate analysis runs when validating one strategy branch repeatedly.
 - Also useful for: promoting one stricter paper preset as the main candidate while still forcing aggregate skepticism checks such as side correctness, PnL excluding top trades, and closed-trade-count progress before treating it as promising.
+- Also useful for: degradation audits and stricter paper-only candidate searches that compare early vs recent sessions, matched vs mismatched accepted trades, stricter entry bands, side filters, edge thresholds, spread thresholds, and expiry windows without changing strategy behavior or adding execution.
+- Also useful for: out-of-sample validation design, including freezing candidate variants before collecting more data and separating in-sample discovery from later-session validation.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -62,6 +64,8 @@ Useful ideas:
 - operational workflow ideas: collecting many short public sessions, then validating a conservative branch across them with explicit progress-to-readiness criteria instead of trusting one attractive session
 - directional audit ideas: comparing the normal paper signal against a reversed version, then checking whether side correctness, expectancy, and PnL excluding top trades improve under stricter paper-only filters
 - candidate-promotion ideas: giving the best paper-only filter set an explicit preset name, then validating it session by session instead of treating side-sweep output as the final workflow
+- degradation-audit ideas: checking whether a promoted paper candidate is weakening as new sessions arrive, and requiring higher standards than a small positive PnL before continuing research
+- out-of-sample validation ideas: freezing an interesting paper filter set, then evaluating it on sessions after a cutoff instead of continually re-optimizing old data
 
 Do not copy yet:
 - live execution
@@ -75,6 +79,8 @@ Relevant future phases:
 - Phase 15+: monitoring/reporting and strategy-audit workflow
 - Phase 16+: conservative preset validation, multi-session side-correctness review, and paper-readiness criteria
 - Phase 18+: reverse-signal research, side-correctness deep audit, and paper candidate ranking without adding any execution path
+- Phase 20+: degradation audit and stricter paper-only candidate search for the promoted conservative-entry candidate
+- Phase 21+: out-of-sample validation and target tracking for frozen paper variants
 - Phase 17+: live-executor design review, separate from paper engine
 
 Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

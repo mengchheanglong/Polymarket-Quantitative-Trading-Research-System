@@ -1158,6 +1158,7 @@ class SQLiteStore:
         self,
         asset: str,
         *,
+        source_prefix: str | None = None,
         source_filter: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
@@ -1165,6 +1166,9 @@ class SQLiteStore:
     ) -> PriceSnapshot | None:
         clauses = ["asset = ?"]
         params: list[Any] = [asset]
+        if source_prefix:
+            clauses.append("source LIKE ?")
+            params.append(f"{source_prefix}%")
         source_clause, source_params = _source_sql("source", source_filter)
         if source_clause:
             clauses.append(source_clause)
@@ -1188,14 +1192,20 @@ class SQLiteStore:
             """,
             tuple(params),
         ).fetchone()
-        if row is None:
-            return None
-        return PriceSnapshot(
-            asset=asset_enum(str(row["asset"])),
-            price=float(row["price"]),
-            timestamp=_from_iso(str(row["observed_at"])),
-            source=str(row["source"]),
+        price_snapshot = _price_snapshot_from_price_row(row) if row is not None else None
+        raw_snapshot = self._raw_latest_exchange_price(
+            asset=asset,
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+            source_prefix=source_prefix,
         )
+        if price_snapshot is None:
+            return raw_snapshot
+        if raw_snapshot is None:
+            return price_snapshot
+        return max((price_snapshot, raw_snapshot), key=lambda item: item.timestamp)
 
     def nearest_price(
         self,
@@ -1224,8 +1234,7 @@ class SQLiteStore:
             """,
             tuple(params),
         )
-        if not rows:
-            return None
+        candidate_prices: list[tuple[float, datetime, PriceSnapshot]] = []
         candidate_rows = []
         for row in rows:
             try:
@@ -1234,16 +1243,23 @@ class SQLiteStore:
                 continue
             delta = abs((observed_at - target).total_seconds())
             if delta <= max_delta_seconds:
-                candidate_rows.append((delta, observed_at, row))
-        if not candidate_rows:
+                snapshot = _price_snapshot_from_price_row(row)
+                if snapshot is not None:
+                    candidate_prices.append((delta, observed_at, snapshot))
+        for snapshot in self._raw_exchange_price_candidates(
+            asset=asset,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=None,
+            until=None,
+        ):
+            delta = abs((snapshot.timestamp - target).total_seconds())
+            if delta <= max_delta_seconds:
+                candidate_prices.append((delta, snapshot.timestamp, snapshot))
+        if not candidate_prices:
             return None
-        _, _, row = min(candidate_rows, key=lambda item: (item[0], -item[1].timestamp()))
-        return PriceSnapshot(
-            asset=asset_enum(str(row["asset"])),
-            price=float(row["price"]),
-            timestamp=_from_iso(str(row["observed_at"])),
-            source=str(row["source"]),
-        )
+        _, _, snapshot = min(candidate_prices, key=lambda item: (item[0], -item[1].timestamp()))
+        return snapshot
 
     def skipped_opportunity_rows(self, run_id: str | None = None) -> list[sqlite3.Row]:
         clause = ""
@@ -1302,16 +1318,92 @@ class SQLiteStore:
         )
         latest: dict[str, PriceSnapshot] = {}
         for row in rows:
-            asset = str(row["asset"])
-            if asset in latest:
+            snapshot = _price_snapshot_from_price_row(row)
+            if snapshot is None:
                 continue
-            latest[asset] = PriceSnapshot(
-                asset=asset_enum(asset),
-                price=float(row["price"]),
-                timestamp=_from_iso(str(row["observed_at"])),
-                source=str(row["source"]),
-            )
+            asset = snapshot.asset.value
+            existing = latest.get(asset)
+            if existing is None or snapshot.timestamp > existing.timestamp:
+                latest[asset] = snapshot
+        for snapshot in self._raw_exchange_price_candidates(
+            asset=None,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=since,
+            until=until,
+            source_prefix=source_prefix,
+        ):
+            existing = latest.get(snapshot.asset.value)
+            if existing is None or snapshot.timestamp > existing.timestamp:
+                latest[snapshot.asset.value] = snapshot
         return latest
+
+    def _raw_exchange_price_candidates(
+        self,
+        *,
+        asset: str | None,
+        source_filter: str | None,
+        session_id: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        source_prefix: str | None = None,
+    ) -> list[PriceSnapshot]:
+        clauses = ["snapshot_type = 'exchange_price'"]
+        params: list[Any] = []
+        if asset is not None:
+            clauses.append("asset = ?")
+            params.append(asset)
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if source_prefix:
+            clauses.append("source_name LIKE ?")
+            params.append(f"{source_prefix}%")
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
+        rows = self.rows(
+            f"""
+            SELECT observed_at, asset, source_name, payload_json
+            FROM raw_snapshots
+            WHERE {' AND '.join(clauses)}
+            ORDER BY observed_at DESC, id DESC
+            """,
+            tuple(params),
+        )
+        snapshots: list[PriceSnapshot] = []
+        for row in rows:
+            snapshot = _price_snapshot_from_raw_row(row)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return snapshots
+
+    def _raw_latest_exchange_price(
+        self,
+        *,
+        asset: str,
+        source_filter: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        session_id: str | None,
+        source_prefix: str | None = None,
+    ) -> PriceSnapshot | None:
+        candidates = self._raw_exchange_price_candidates(
+            asset=asset,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=since,
+            until=until,
+            source_prefix=source_prefix,
+        )
+        return candidates[0] if candidates else None
 
     def recent_candles(
         self,
@@ -1675,10 +1767,45 @@ class SQLiteStore:
                 _from_iso(str(row["observed_at"]))
             except ValueError:
                 invalid_timestamps += 1
-        latest_prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
-        missing_prices = sum(1 for asset in ("BTC", "ETH") if asset not in latest_prices)
         markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
         discovered_rows = self.discovered_market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        latest_prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        raw_asset_clauses = ["snapshot_type = 'exchange_price'", "asset IS NOT NULL"]
+        raw_asset_params: list[Any] = []
+        raw_source_clause, raw_source_params = _source_sql("source_name", source_filter)
+        if raw_source_clause:
+            raw_asset_clauses.append(raw_source_clause)
+            raw_asset_params.extend(raw_source_params)
+        if session_id is not None:
+            raw_asset_clauses.append("session_id = ?")
+            raw_asset_params.append(session_id)
+        if since is not None:
+            raw_asset_clauses.append("observed_at >= ?")
+            raw_asset_params.append(_iso(since))
+        if until is not None:
+            raw_asset_clauses.append("observed_at <= ?")
+            raw_asset_params.append(_iso(until))
+        required_assets = {
+            str(row["asset"])
+            for row in self.rows(
+                f"""
+                SELECT DISTINCT asset
+                FROM raw_snapshots
+                WHERE {' AND '.join(raw_asset_clauses)}
+                """,
+                tuple(raw_asset_params),
+            )
+        }
+        market_assets = {
+            market.asset.value
+            for market in markets
+        } | {
+            str(row["asset_label"])
+            for row in discovered_rows
+            if str(row["asset_label"]) in {"BTC", "ETH"} and int(row["accepted"]) == 1
+        }
+        required_assets = market_assets or required_assets or set(latest_prices.keys())
+        missing_prices = sum(1 for asset in required_assets if asset not in latest_prices)
         missing_orderbooks = 0
         wide_spreads = 0
         low_liquidity = 0
@@ -2135,6 +2262,39 @@ def _id_filter(ids: list[int]) -> tuple[str, tuple[Any, ...]]:
 
 def _is_demo_source(source_name: str) -> bool:
     return source_name.startswith("mock:")
+
+
+def _price_snapshot_from_price_row(row: sqlite3.Row | None) -> PriceSnapshot | None:
+    if row is None:
+        return None
+    return PriceSnapshot(
+        asset=asset_enum(str(row["asset"])),
+        price=float(row["price"]),
+        timestamp=_from_iso(str(row["observed_at"])),
+        source=str(row["source"]),
+    )
+
+
+def _price_snapshot_from_raw_row(row: sqlite3.Row | None) -> PriceSnapshot | None:
+    if row is None or row["asset"] is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except json.JSONDecodeError:
+        return None
+    price = payload.get("price")
+    if price is None:
+        return None
+    try:
+        observed_at = _from_iso(str(row["observed_at"]))
+    except ValueError:
+        return None
+    return PriceSnapshot(
+        asset=asset_enum(str(row["asset"])),
+        price=float(price),
+        timestamp=observed_at,
+        source=str(row["source_name"]),
+    )
 
 
 def _detected_market_type(title: str, slug: str) -> str:

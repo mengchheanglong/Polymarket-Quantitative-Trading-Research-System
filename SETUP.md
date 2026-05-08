@@ -184,6 +184,11 @@ python -m src.main replay --strategy momentum --preset conservative-tiny-reverse
 python -m src.main side-sweep --source public
 python -m src.main candidate-ranking --source public
 python -m src.main compare-candidates --source public
+python -m src.main degradation-audit --candidate conservative-entry-30-70 --source public
+python -m src.main strict-candidate-sweep --candidate conservative-entry-30-70 --source public
+python -m src.main strict-candidate-ranking --source public
+python -m src.main outsample-report --source public --since 2026-05-07T12:00:00Z
+python -m src.main validation-target --source public --since 2026-05-07T12:00:00Z
 ```
 
 Inspect skip reasons and market-level diagnostics:
@@ -199,6 +204,10 @@ Replay diagnostics now include timing buckets and seconds-to-expiry summaries. R
 Phase 12 diagnostics also separate strategy skips from risk-blocked skips and report exposure over time, average trade size, largest single trade, max simultaneous positions, cooldown skips, and loss-limit skips.
 Phase 13 adds profit-concentration metrics, low-price-entry contribution, settlement sanity checks, and close-mode comparison on the same stored session.
 Phase 14 adds a paper-only BTC 5-minute stuck-state / Markov strategy that uses stored public orderbook snapshots to detect side prices stuck in the `0.70-0.80` zone while BTC moves underneath.
+Phase 20 adds degradation and strict-candidate audit commands for `conservative-entry-30-70`. Use them after `validate-candidate` or `candidate-report` to check whether recent sessions are weakening, whether matched trades differ from mismatched trades, and whether any stricter stored-snapshot sub-candidate improves side correctness without increasing tail-risk concentration.
+
+The `55%` side-correctness threshold is only a research continuation gate. Do not treat it as live readiness. A stronger paper-promising bar should include `100+` closed trades, `58-60%+` side correctness, positive expectancy, positive PnL excluding top trades, and no degrading trend.
+Phase 21 adds out-of-sample validation. Pick an ISO cutoff after the sessions used to discover the variants, then run `outsample-report` and `validation-target`. The frozen variants are evaluated before and after that cutoff so later sessions test the hypothesis instead of re-optimizing it.
 
 Run a research-only threshold sweep on stored snapshots:
 

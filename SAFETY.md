@@ -41,6 +41,8 @@ Phase 1 is paper-only by design.
 - `conservative-report` is a paper-only validation command. It replays stored sessions with the conservative preset only, aggregates skepticism metrics such as top-trade concentration and side correctness, and never calls authenticated APIs.
 - `preset-report`, `compare-candidates`, and `validate-conservative --preset ...` are also paper-only. They may create additional stored replay runs, but only by replaying already-collected public snapshots inside SQLite. They still cannot place orders or touch authenticated APIs.
 - `side-audit`, `side-sweep`, and `candidate-ranking` are paper-only directional audit commands. They inspect stored conservative runs, compare normal vs reversed paper signals, and rank paper candidates without creating any execution path.
+- `degradation-audit`, `strict-candidate-sweep`, and `strict-candidate-ranking` are paper-only skepticism commands for the current `conservative-entry-30-70` candidate. They read cached paper summaries, stored runs, trades, and accepted-trade audit rows. They do not collect new market data, do not promote a live strategy, and do not add execution capability.
+- `outsample-report` and `validation-target` are paper-only validation commands. They freeze a small set of candidate variants, split stored sessions by an ISO cutoff, and report whether later sessions support or reject the paper hypothesis. They do not change strategy logic or create any live path.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
 - Tiny momentum is not trusted just because mark-to-market looks positive. Phase 15 explicitly checks accepted-trade edge, side correctness at approximate expiry, and whether close-mode disagreement is large enough to invalidate the paper result.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
@@ -64,6 +66,8 @@ Report metrics are paper metrics only:
 - `approximate-expiry` is still research-only. It infers settlement from nearby stored exchange prices and can be wrong even when the accounting looks attractive.
 - `CLOSE_MODE_DIVERGENCE`, `ACCEPTED_EDGE_NEGATIVE`, and `DIRECTIONAL_SIGNAL_FAILED` are skepticism warnings, not trading signals. They exist to keep a paper result from being over-interpreted.
 - `PAPER_PROMISING` is a research verdict, not a go-live decision. It is only a stricter paper-screening label and still does not authorize live trading, wallet setup, signing, or order execution.
+- A `55%` side-correctness gate is only a research-continuation checkpoint. Higher paper standards should require larger samples, stronger side correctness, positive expectancy, positive PnL after excluding top trades, and no degrading trend before even discussing separate live-system design.
+- Out-of-sample validation is still paper validation. Freezing a variant before collecting new data reduces overfitting risk, but it still does not authorize wallets, credentials, signing, authenticated APIs, or order execution.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
 
