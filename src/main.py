@@ -20,6 +20,7 @@ from src.models import Asset, Direction, Market, OpportunityDecision, OrderBook,
 from src.reports.backtest import build_backtest_report
 from src.reports.active_markets import build_active_market_report, select_market_snapshots
 from src.reports.compare import build_strategy_comparison
+from src.reports.consistency import build_consistency_audit
 from src.reports.conservative_report import (
     ConservativeAggregateRow,
     ConservativeSessionRow,
@@ -64,6 +65,27 @@ from src.strategies.stuck_state_markov import (
 from src.strategies.updown_momentum import MomentumUpDownStrategy
 
 
+NAMED_PRESETS = (
+    "balanced-tiny",
+    "conservative-tiny",
+    "conservative-tiny-reverse",
+    "conservative-entry-30-70",
+    "conservative-entry-40-75",
+    "conservative-up-only-40-75",
+)
+VALIDATION_PRESETS = (
+    "conservative-tiny",
+    "conservative-entry-30-70",
+    "conservative-entry-40-75",
+    "conservative-up-only-40-75",
+)
+CANDIDATE_PRESETS = (
+    "conservative-entry-30-70",
+    "conservative-entry-40-75",
+    "conservative-up-only-40-75",
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Polymarket BTC/ETH UP-DOWN paper agent")
     parser.add_argument(
@@ -91,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse", "conservative-entry-30-70"),
+        choices=NAMED_PRESETS,
         default=None,
         help="Apply a paper-only preset.",
     )
@@ -122,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("--tiny", action="store_true", help="Apply the tiny-position paper-risk profile.")
     replay_parser.add_argument(
         "--preset",
-        choices=("balanced-tiny", "conservative-tiny", "conservative-tiny-reverse", "conservative-entry-30-70"),
+        choices=NAMED_PRESETS,
         default=None,
         help="Apply a paper-only preset.",
     )
@@ -236,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
     export_parser.add_argument("--validation", choices=("conservative",), default=None, help="Export a paper-validation package.")
     export_parser.add_argument(
         "--candidate",
-        choices=("conservative-entry-30-70",),
+        choices=CANDIDATE_PRESETS,
         default=None,
         help="Export the validation package for one named paper candidate.",
     )
@@ -253,6 +275,17 @@ def main(argv: list[str] | None = None) -> int:
     settlement_report_parser = subcommands.add_parser("settlement-report", help="Inspect approximate-expiry settlement inputs for a run")
     settlement_report_parser.add_argument("--run-id", help="Inspect a specific run.")
     settlement_report_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
+    consistency_audit_parser = subcommands.add_parser("consistency-audit", help="Check trade-level settlement, side-correctness, and PnL consistency")
+    consistency_audit_parser.add_argument("--run-id", help="Inspect a specific run.")
+    consistency_audit_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
+    consistency_audit_parser.add_argument("--session-id", help="Inspect the matching candidate run for one session.")
+    consistency_audit_parser.add_argument(
+        "--candidate",
+        choices=VALIDATION_PRESETS,
+        default=None,
+        help="Resolve the run from a named candidate preset when --session-id is used.",
+    )
+    consistency_audit_parser.add_argument("--source", choices=("public", "all"), default="public")
     signal_audit_parser = subcommands.add_parser("signal-audit", help="Audit accepted momentum signals for a run")
     signal_audit_parser.add_argument("--run-id", help="Inspect a specific run.")
     signal_audit_parser.add_argument("--latest", action="store_true", help="Inspect the latest run.")
@@ -293,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     conservative_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     conservative_report_parser.add_argument(
         "--preset",
-        choices=("conservative-tiny", "conservative-entry-30-70"),
+        choices=VALIDATION_PRESETS,
         default="conservative-entry-30-70",
         help="Named paper-only momentum preset to aggregate.",
     )
@@ -301,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     preset_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     preset_report_parser.add_argument(
         "--preset",
-        choices=("conservative-tiny", "conservative-entry-30-70"),
+        choices=VALIDATION_PRESETS,
         required=True,
         help="Named paper-only momentum preset to aggregate.",
     )
@@ -310,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_conservative_parser.add_argument("--source", choices=("public", "all"), default="public")
     validate_conservative_parser.add_argument(
         "--preset",
-        choices=("conservative-tiny", "conservative-entry-30-70"),
+        choices=VALIDATION_PRESETS,
         default="conservative-entry-30-70",
         help="Named paper-only momentum preset to validate.",
     )
@@ -320,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_candidate_parser.add_argument("--source", choices=("public", "all"), default="public")
     validate_candidate_parser.add_argument(
         "--candidate",
-        choices=("conservative-entry-30-70",),
+        choices=CANDIDATE_PRESETS,
         required=True,
         help="Named paper-only candidate preset to validate.",
     )
@@ -330,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     candidate_report_parser.add_argument("--source", choices=("public", "all"), default="public")
     candidate_report_parser.add_argument(
         "--candidate",
-        choices=("conservative-entry-30-70",),
+        choices=CANDIDATE_PRESETS,
         required=True,
         help="Named paper-only candidate preset to summarize.",
     )
@@ -357,11 +390,11 @@ def main(argv: list[str] | None = None) -> int:
     strict_ranking_parser.add_argument("--refresh", action="store_true", help="Refresh cached strict variant summaries before ranking.")
     outsample_report_parser = subcommands.add_parser("outsample-report", help="Validate frozen paper variants after an out-of-sample cutoff")
     outsample_report_parser.add_argument("--source", choices=("public", "all"), default="public")
-    outsample_report_parser.add_argument("--candidate", choices=("conservative-entry-30-70",), default="conservative-entry-30-70")
+    outsample_report_parser.add_argument("--candidate", choices=CANDIDATE_PRESETS, default="conservative-entry-30-70")
     outsample_report_parser.add_argument("--since", required=True, help="ISO timestamp that separates in-sample from out-of-sample sessions.")
     validation_target_parser = subcommands.add_parser("validation-target", help="Show out-of-sample closed-trade targets for frozen variants")
     validation_target_parser.add_argument("--source", choices=("public", "all"), default="public")
-    validation_target_parser.add_argument("--candidate", choices=("conservative-entry-30-70",), default="conservative-entry-30-70")
+    validation_target_parser.add_argument("--candidate", choices=CANDIDATE_PRESETS, default="conservative-entry-30-70")
     validation_target_parser.add_argument("--since", required=True, help="ISO timestamp that separates in-sample from out-of-sample sessions.")
     args = parser.parse_args(argv)
 
@@ -435,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
             return close_mode_compare(config, args)
         if args.command == "settlement-report":
             return settlement_report(config, args)
+        if args.command == "consistency-audit":
+            return consistency_audit(config, args)
         if args.command == "signal-audit":
             return signal_audit(config, args)
         if args.command == "side-audit":
@@ -853,6 +888,12 @@ def session_report(config: AgentConfig, args) -> int:
             return 1
         quality = store.data_quality_metrics(source_filter="public", since=since, until=until, session_id=session_id)
         readiness_result = store.readiness(source_filter="public", since=since, until=until, session_id=session_id)
+        exchange_quality = store.exchange_price_quality_summary(
+            source_filter="public",
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
         markets = store.market_audit_rows(source_filter="public", since=since, until=until, session_id=session_id)
         exchange_lines = _session_exchange_diagnostic_lines(store, session_id, since, until)
         found = sum(1 for row in markets if row["accepted"])
@@ -877,6 +918,15 @@ def session_report(config: AgentConfig, args) -> int:
         print("Exchange price snapshots by source:")
         for line in exchange_lines:
             print(line)
+        print(
+            "Exchange quality: "
+            f"divergence_count={exchange_quality['divergence_count']}, "
+            f"max_divergence_abs={exchange_quality['max_divergence_abs']:.2f}, "
+            f"max_divergence_pct={exchange_quality['max_divergence_pct']:.4%}, "
+            f"stale_repeat_by_source={exchange_quality['stale_repeat_count_by_source']}, "
+            f"suspect_by_source={exchange_quality['suspect_snapshot_count_by_source']}, "
+            f"cycles_excluded_due_to_quality={exchange_quality['cycles_excluded_due_to_exchange_quality']}"
+        )
         print(f"BTC/ETH markets found: {found}")
         print(f"Orderbooks captured: {orderbooks}")
         print(f"Readiness verdict: {readiness_result['verdict']}")
@@ -890,6 +940,10 @@ def session_report(config: AgentConfig, args) -> int:
             f"invalid_timestamps={quality['invalid_timestamps']}, "
             f"missing_orderbooks={quality['missing_orderbooks']}, "
             f"missing_prices={quality['missing_prices']}"
+        )
+        print(
+            "Session replay safety: "
+            + ("SAFE_FOR_REPLAY" if exchange_quality["safe_for_replay"] else "EXCLUDED_BY_EXCHANGE_PRICE_QUALITY")
         )
         print(f"Validation status: {_validation_status_line(readiness_result['verdict'])}")
         print(f"Market discovery summary: accepted={found}, rejected={len(markets) - found}")
@@ -967,6 +1021,12 @@ def _session_exchange_diagnostic_lines(
     since: datetime | None,
     until: datetime | None,
 ) -> list[str]:
+    exchange_quality = store.exchange_price_quality_summary(
+        source_filter="public",
+        since=since,
+        until=until,
+        session_id=session_id,
+    )
     raw_rows = store.rows(
         """
         SELECT source_name, asset, COUNT(*) AS count, MIN(observed_at) AS first_seen, MAX(observed_at) AS latest_seen
@@ -1012,7 +1072,9 @@ def _session_exchange_diagnostic_lines(
             if visible_snapshot is not None
             else "n/a"
         )
-        stale_by_source = 0 if visible_snapshot is not None else int(row["count"])
+        stale_repeat = int(exchange_quality["stale_repeat_count_by_source"].get(str(row["source_name"]), 0))
+        suspect = int(exchange_quality["suspect_snapshot_count_by_source"].get(str(row["source_name"]), 0))
+        stale_by_source = suspect if visible_snapshot is not None else int(row["count"])
         lines.append(
             " | ".join(
                 [
@@ -1021,6 +1083,8 @@ def _session_exchange_diagnostic_lines(
                     f"raw_latest={raw_latest}",
                     f"stored_latest={stored_latest}",
                     f"latest_visible_price_ts={visible_label}",
+                    f"stale_repeat={stale_repeat}",
+                    f"suspect_snapshots={suspect}",
                     f"stale_exchange_by_source={stale_by_source}",
                 ]
             )
@@ -1470,6 +1534,20 @@ def settlement_report(config: AgentConfig, args) -> int:
     return 0
 
 
+def consistency_audit(config: AgentConfig, args) -> int:
+    source_filter = _clean_source_filter(getattr(args, "source", None)) or "public"
+    store = SQLiteStore(config.database_path)
+    try:
+        run_id = _resolve_audit_run_id(store, config, args, source_filter=source_filter)
+        if not run_id:
+            print("No run selected.")
+            return 1
+        print(build_consistency_audit(store, run_id))
+    finally:
+        store.close()
+    return 0
+
+
 def signal_audit(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
@@ -1483,6 +1561,36 @@ def signal_audit(config: AgentConfig, args) -> int:
     finally:
         store.close()
     return 0
+
+
+def _resolve_audit_run_id(
+    store: SQLiteStore,
+    config: AgentConfig,
+    args,
+    *,
+    source_filter: str,
+) -> str | None:
+    run_id = getattr(args, "run_id", None)
+    if run_id:
+        return run_id
+    session_id = getattr(args, "session_id", None)
+    candidate = getattr(args, "candidate", None)
+    if session_id and candidate:
+        validation_config = _replace_close_mode(
+            _replace_strategy(_apply_named_preset(config, candidate), "momentum"),
+            "approximate-expiry",
+        )
+        run = _matching_momentum_run(
+            store,
+            session_id=session_id,
+            source_filter=source_filter,
+            preset=validation_config.momentum_preset or candidate,
+            reverse_signal=validation_config.reverse_signal,
+        )
+        return str(run["run_id"]) if run is not None else None
+    if bool(getattr(args, "latest", False)) or not getattr(args, "run_id", None):
+        return store.latest_run_id()
+    return None
 
 
 def side_audit(config: AgentConfig, args) -> int:
@@ -1689,7 +1797,7 @@ def candidate_ranking(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         session_scope = getattr(args, "session_id", None) or "all ready public sessions"
-        rows = _side_sweep_variant_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
+        rows = _comparison_candidate_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
         print(build_candidate_ranking_report(source_filter=source_filter, session_scope=session_scope, rows=rows))
     finally:
         store.close()
@@ -1701,17 +1809,8 @@ def compare_candidates(config: AgentConfig, args) -> int:
     store = SQLiteStore(config.database_path)
     try:
         session_scope = getattr(args, "session_id", None) or "all ready public sessions"
-        rows = _side_sweep_variant_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
-        selected_labels = (
-            "conservative-tiny",
-            "conservative-entry-30-70",
-            "reverse conservative",
-            "entry-0.40-0.75",
-            "DOWN-only",
-            "expiry-120-180",
-        )
-        selected_rows = [row for row in rows if row.label in selected_labels]
-        print(build_candidate_comparison_report(source_filter=source_filter, session_scope=session_scope, rows=selected_rows))
+        rows = _comparison_candidate_rows(store, config, source_filter=source_filter, session_id=getattr(args, "session_id", None))
+        print(build_candidate_comparison_report(source_filter=source_filter, session_scope=session_scope, rows=rows))
     finally:
         store.close()
     return 0
@@ -1782,6 +1881,8 @@ def validate_conservative(config: AgentConfig, args) -> int:
                         f"reason={blocker['reason']}",
                         f"exchange_price_snapshots={blocker['exchange_price_snapshots']}",
                         f"stale_exchange_prices={blocker['stale_exchange_prices']}",
+                        f"exchange_divergence_count={blocker['exchange_divergence_count']}",
+                        f"exchange_cycles_excluded_due_to_quality={blocker['exchange_cycles_excluded_due_to_quality']}",
                         f"suggested_fix={blocker['suggested_fix']}",
                     ]
                 )
@@ -2736,7 +2837,7 @@ def _close_replay_positions(
                     exit_price=None,
                     status="SETTLEMENT_UNAVAILABLE",
                     close_mode=close_mode,
-                    settlement_note="approximate expiry prices unavailable",
+                    settlement_note="approximate expiry prices unavailable or suspect exchange quality [EXCHANGE_PRICE_QUALITY]",
                 )
                 status_counts["settlement_unavailable"] += 1
                 continue
@@ -2829,17 +2930,19 @@ def _simulate_replay(
     result_store: SQLiteStore,
     mode: str,
     since_label: str | None,
+    replay_context_cache: dict[tuple[object, ...], tuple] | None = None,
 ) -> dict:
-    current_prices, candle_source, markets, orderbook_source, settlement_prices, actual_sources = _load_replay_context(
+    current_prices, candle_source, markets, orderbook_source, settlement_prices, actual_sources = _cached_replay_context(
         data_store,
+        config,
         source_filter=source_filter,
         since=since,
         until=until,
         session_id=session_id,
-        config=config,
         active_only=active_only,
         min_seconds_to_expiry=min_seconds_to_expiry,
         max_seconds_to_expiry=max_seconds_to_expiry,
+        replay_context_cache=replay_context_cache,
     )
     if not current_prices:
         return {
@@ -3010,6 +3113,7 @@ def _scratch_replay_summary(
     max_seconds_to_expiry: int | None,
     mode: str,
     label: str,
+    replay_context_cache: dict[tuple[object, ...], tuple] | None = None,
 ) -> dict:
     with tempfile.TemporaryDirectory(prefix="momentum-audit-") as temp_dir:
         scratch = SQLiteStore(Path(temp_dir) / "audit.sqlite3")
@@ -3028,6 +3132,7 @@ def _scratch_replay_summary(
                 result_store=scratch,
                 mode=mode,
                 since_label=since.isoformat() if since else None,
+                replay_context_cache=replay_context_cache,
             )
             if not outcome["ok"]:
                 return {
@@ -3129,6 +3234,7 @@ def _conservative_variant_summary(
     source_filter: str | None,
     session_id: str,
     label: str,
+    replay_context_cache: dict[tuple[object, ...], tuple] | None = None,
 ) -> dict:
     summary = _scratch_replay_summary(
         config,
@@ -3142,6 +3248,7 @@ def _conservative_variant_summary(
         max_seconds_to_expiry=config.max_seconds_to_expiry,
         mode="replay",
         label=label,
+        replay_context_cache=replay_context_cache,
     )
     if not summary["ok"] or summary["report"] is None:
         return summary
@@ -3249,6 +3356,12 @@ def _candidate_validation_blockers(
             until=until,
             session_id=current_session_id,
         )
+        exchange_quality = store.exchange_price_quality_summary(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=current_session_id,
+        )
         summary = store.dataset_summary(
             source_filter=source_filter,
             since=since,
@@ -3261,14 +3374,253 @@ def _candidate_validation_blockers(
                 "reason": readiness_result["verdict"],
                 "exchange_price_snapshots": summary["exchange_price_snapshots"],
                 "stale_exchange_prices": quality["stale_exchange_prices"],
+                "exchange_divergence_count": exchange_quality["divergence_count"],
+                "exchange_cycles_excluded_due_to_quality": exchange_quality["cycles_excluded_due_to_exchange_quality"],
                 "suggested_fix": (
                     "collect BTC prices from Coinbase and Kraken in a new focused session"
                     if summary["exchange_price_snapshots"] == 0
-                    else "session has BTC price snapshots but they are stale or outside the replay window"
+                    else (
+                        "session has BTC price snapshots but exchange source quality is suspect; prefer a focused BTC session with clean Coinbase/Kraken agreement"
+                        if exchange_quality["cycles_excluded_due_to_exchange_quality"] > 0 or exchange_quality["divergence_count"] > 0
+                        else "session has BTC price snapshots but they are stale or outside the replay window"
+                    )
                 ),
             }
         )
     return blockers
+
+
+def _comparison_candidate_rows(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str,
+    session_id: str | None,
+) -> list[ConservativeAggregateRow]:
+    comparison_rows: list[ConservativeAggregateRow] = []
+    ready_sessions = _ready_public_sessions(store, source_filter=source_filter, session_id=session_id)
+    if not ready_sessions:
+        return comparison_rows
+
+    conservative_tiny = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-tiny"), "momentum"),
+        "approximate-expiry",
+    )
+    reverse_tiny = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-tiny-reverse"), "momentum"),
+        "approximate-expiry",
+    )
+    promoted = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-entry-30-70"), "momentum"),
+        "approximate-expiry",
+    )
+    entry_40_75 = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-entry-40-75"), "momentum"),
+        "approximate-expiry",
+    )
+    up_only_40_75 = _replace_close_mode(
+        _replace_strategy(_apply_named_preset(config, "conservative-up-only-40-75"), "momentum"),
+        "approximate-expiry",
+    )
+
+    for label, validation_config in (
+        ("conservative-tiny", conservative_tiny),
+        ("reverse conservative", reverse_tiny),
+        ("conservative-entry-30-70", promoted),
+        ("conservative-entry-40-75", entry_40_75),
+        ("conservative-up-only-40-75", up_only_40_75),
+    ):
+        _ensure_candidate_cache_from_preset_runs(
+            store,
+            config,
+            source_filter=source_filter,
+            ready_sessions=ready_sessions,
+            candidate_name=label,
+            validation_config=validation_config,
+        )
+
+    conservative_tiny_rows = store.candidate_session_summary_rows(
+        candidate_name="conservative-tiny",
+        source_filter=source_filter,
+        config_fingerprint=_candidate_config_fingerprint(conservative_tiny),
+    )
+    if conservative_tiny_rows:
+        _ensure_filtered_candidate_cache(
+            store,
+            source_filter=source_filter,
+            label="entry-0.40-0.75",
+            variant_config=_replace_config_values(conservative_tiny, momentum_min_entry_price=0.40, momentum_max_entry_price=0.75),
+            base_rows=conservative_tiny_rows,
+            predicate=lambda row: 0.40 <= row.entry_price <= 0.75,
+        )
+        _ensure_filtered_candidate_cache(
+            store,
+            source_filter=source_filter,
+            label="DOWN-only",
+            variant_config=_replace_config_values(conservative_tiny, momentum_side_filter="DOWN"),
+            base_rows=conservative_tiny_rows,
+            predicate=lambda row: row.side == "DOWN",
+        )
+        _ensure_filtered_candidate_cache(
+            store,
+            source_filter=source_filter,
+            label="expiry-120-180",
+            variant_config=_replace_config_values(conservative_tiny, min_seconds_to_expiry=120, max_seconds_to_expiry=180),
+            base_rows=conservative_tiny_rows,
+            predicate=lambda row: 120 <= row.seconds_to_expiry <= 180,
+        )
+
+    requested = [
+        ("conservative-tiny", conservative_tiny),
+        ("conservative-entry-30-70", promoted),
+        ("conservative-entry-40-75", entry_40_75),
+        ("conservative-up-only-40-75", up_only_40_75),
+        ("reverse conservative", reverse_tiny),
+        ("entry-0.40-0.75", _replace_config_values(conservative_tiny, momentum_min_entry_price=0.40, momentum_max_entry_price=0.75)),
+        ("DOWN-only", _replace_config_values(conservative_tiny, momentum_side_filter="DOWN")),
+        ("expiry-120-180", _replace_config_values(conservative_tiny, min_seconds_to_expiry=120, max_seconds_to_expiry=180)),
+    ]
+    for label, variant_config in requested:
+        aggregate = store.candidate_aggregate_summary(
+            candidate_name=label,
+            source_filter=source_filter,
+            config_fingerprint=_candidate_config_fingerprint(variant_config),
+        )
+        if aggregate is None:
+            continue
+        session_rows = store.candidate_session_summary_rows(
+            candidate_name=label,
+            source_filter=source_filter,
+            config_fingerprint=_candidate_config_fingerprint(variant_config),
+        )
+        row = _cached_aggregate_row(
+            label,
+            aggregate,
+            warnings=tuple(
+                dict.fromkeys(
+                    warning
+                    for session_row in session_rows
+                    for warning in tuple(json.loads(str(session_row["warnings_json"] or "[]")))
+                )
+            ),
+        )
+        comparison_rows.append(row)
+    if len(comparison_rows) < len(requested):
+        existing = {row.label for row in comparison_rows}
+        for label, _variant_config in requested:
+            if label not in existing:
+                comparison_rows.append(_missing_candidate_row(label))
+    return comparison_rows
+
+
+def _ensure_candidate_cache_from_preset_runs(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str,
+    ready_sessions: list[tuple[str, datetime | None, datetime | None]],
+    candidate_name: str,
+    validation_config: AgentConfig,
+) -> None:
+    fingerprint = _candidate_config_fingerprint(validation_config)
+    preset = validation_config.momentum_preset or candidate_name
+    reverse_signal = validation_config.reverse_signal
+    for current_session_id, since, until in ready_sessions:
+        cached = store.candidate_session_summary(
+            candidate_name=candidate_name,
+            session_id=current_session_id,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+        )
+        if cached is not None:
+            continue
+        run = _matching_momentum_run(
+            store,
+            session_id=current_session_id,
+            source_filter=source_filter,
+            preset=preset,
+            reverse_signal=reverse_signal,
+        )
+        if run is None:
+            continue
+        run_id = str(run["run_id"])
+        row = _candidate_session_row_from_run(
+            store,
+            config,
+            candidate_name=candidate_name,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+            run_id=run_id,
+        )
+        if row is not None:
+            store.upsert_candidate_session_summary(row, datetime.now(timezone.utc))
+    _refresh_candidate_aggregate_cache(
+        store,
+        candidate_name=candidate_name,
+        source_filter=source_filter,
+        config_fingerprint=fingerprint,
+    )
+
+
+def _missing_candidate_row(label: str) -> ConservativeAggregateRow:
+    return ConservativeAggregateRow(
+        label=label,
+        sessions_tested=0,
+        accepted_trades=0,
+        closed_trades=0,
+        realized_pnl=0.0,
+        win_rate=0.0,
+        expectancy=None,
+        max_drawdown=0.0,
+        max_exposure=0.0,
+        top_1_trade_pct=None,
+        pnl_excluding_top_1=None,
+        pnl_excluding_top_3=None,
+        settlement_unavailable=0,
+        matched=0,
+        mismatched=0,
+        unknown=0,
+        side_correctness_rate=None,
+        warnings=("CACHE_MISS",),
+        verdicts=("CACHE_MISS",),
+    )
+
+
+def _ensure_filtered_candidate_cache(
+    store: SQLiteStore,
+    *,
+    source_filter: str,
+    label: str,
+    variant_config: AgentConfig,
+    base_rows,
+    predicate,
+) -> None:
+    fingerprint = _candidate_config_fingerprint(variant_config)
+    for base_row in base_rows:
+        if store.candidate_session_summary(
+            candidate_name=label,
+            session_id=str(base_row["session_id"]),
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+        ) is not None:
+            continue
+        _refresh_strict_variant_session_cache(
+            store,
+            candidate_name=label,
+            source_filter=source_filter,
+            config_fingerprint=fingerprint,
+            base_row=base_row,
+            predicate=predicate,
+            variant_config=variant_config,
+        )
+    _refresh_strict_variant_aggregate_cache(
+        store,
+        candidate_name=label,
+        source_filter=source_filter,
+        config_fingerprint=fingerprint,
+        base_rows=base_rows,
+        predicate=predicate,
+    )
 
 
 def _matching_momentum_run(
@@ -3315,6 +3667,7 @@ def _side_sweep_variant_rows(
         "approximate-expiry",
     )
     variant_rows: list[ConservativeAggregateRow] = []
+    replay_context_cache: dict[tuple[object, ...], tuple] = {}
     for label, variant_config in _side_sweep_variants(baseline_config):
         payloads = []
         for current_session_id, _since, _until in ready_sessions:
@@ -3324,6 +3677,7 @@ def _side_sweep_variant_rows(
                 source_filter=source_filter,
                 session_id=current_session_id,
                 label=label,
+                replay_context_cache=replay_context_cache,
             )
             if payload["ok"]:
                 payloads.append(payload)
@@ -3375,6 +3729,7 @@ def _build_preset_report_text(
         "5m-only candidate": [],
         "15m-only candidate": [],
     }
+    replay_context_cache: dict[tuple[object, ...], tuple] = {}
     for session in sessions:
         session_id = str(session["session_id"])
         baseline = _conservative_variant_summary(
@@ -3383,6 +3738,7 @@ def _build_preset_report_text(
             source_filter=source_filter,
             session_id=session_id,
             label=preset,
+            replay_context_cache=replay_context_cache,
         )
         if baseline["ok"]:
             session_payloads.append(baseline)
@@ -3400,6 +3756,7 @@ def _build_preset_report_text(
                 source_filter=source_filter,
                 session_id=session_id,
                 label=label,
+                replay_context_cache=replay_context_cache,
             )
             if variant["ok"]:
                 variant_payloads[label].append(variant)
@@ -3446,7 +3803,10 @@ def _build_preset_report_text(
 
 
 def _candidate_config_fingerprint(config: AgentConfig) -> str:
-    return _conservative_preset_summary(config)
+    return (
+        _conservative_preset_summary(config)
+        + f" | consistency_audit_v2 | exchange_quality_v1={config.exchange_max_divergence_pct:.6f}"
+    )
 
 
 def _refresh_candidate_cache_from_existing_runs(
@@ -3522,6 +3882,14 @@ def _candidate_session_row_from_run(
     report = build_report(store, config.starting_balance, run_id=run_id)
     _audit_run, audit_rows = load_signal_audit_rows(store, run_id)
     audit_summary = summarize_signal_audit_rows(audit_rows)
+    session_id = str(run["session_id"])
+    _, session_since, session_until = _session_bounds(store, session_id)
+    exchange_quality = store.exchange_price_quality_summary(
+        source_filter=source_filter,
+        since=session_since,
+        until=session_until,
+        session_id=session_id,
+    )
     verdicts = conservative_readiness_verdict(
         closed_trades=report.closed_trades,
         realized_pnl=report.realized_pnl,
@@ -3533,9 +3901,16 @@ def _candidate_session_row_from_run(
         drawdown_limit=config.session_loss_limit_usd,
     )
     accepted = store.rows("SELECT COUNT(*) AS count FROM trades WHERE run_id = ?", (run_id,))[0]["count"]
+    warnings = list(report.warnings)
+    if (
+        exchange_quality["divergence_count"] > 0
+        or exchange_quality["cycles_excluded_due_to_exchange_quality"] > 0
+        or any(int(value) > 0 for value in exchange_quality["suspect_snapshot_count_by_source"].values())
+    ):
+        warnings.append("EXCHANGE_PRICE_QUALITY_WARNING")
     return {
         "candidate_name": candidate_name,
-        "session_id": str(run["session_id"]),
+        "session_id": session_id,
         "run_id": run_id,
         "source_filter": source_filter,
         "config_fingerprint": config_fingerprint,
@@ -3554,7 +3929,7 @@ def _candidate_session_row_from_run(
         "mismatched": int(audit_summary["mismatched"]),
         "unknown": int(audit_summary["unknown"]),
         "side_correctness_rate": audit_summary["correctness_rate"],
-        "warnings": report.warnings,
+        "warnings": tuple(dict.fromkeys(warnings)),
         "verdicts": verdicts,
     }
 
@@ -3660,7 +4035,17 @@ def _build_cached_candidate_report_text(
     if not session_cache_rows or aggregate_cache is None:
         return None
     session_rows = [_cached_session_row(row) for row in session_cache_rows]
-    aggregate_row = _cached_aggregate_row(preset, aggregate_cache)
+    aggregate_row = _cached_aggregate_row(
+        preset,
+        aggregate_cache,
+        warnings=tuple(
+            dict.fromkeys(
+                warning
+                for session_row in session_rows
+                for warning in session_row.warnings
+            )
+        ),
+    )
     by_asset = _cached_breakdown("BTC", aggregate_row)
     by_duration = _cached_breakdown("5m", aggregate_row)
     return build_conservative_report(
@@ -3699,7 +4084,7 @@ def _cached_session_row(row) -> ConservativeSessionRow:
     )
 
 
-def _cached_aggregate_row(label: str, row) -> ConservativeAggregateRow:
+def _cached_aggregate_row(label: str, row, warnings: tuple[str, ...] = ()) -> ConservativeAggregateRow:
     return ConservativeAggregateRow(
         label=label,
         sessions_tested=int(row["sessions_tested"]),
@@ -3718,7 +4103,7 @@ def _cached_aggregate_row(label: str, row) -> ConservativeAggregateRow:
         mismatched=int(row["mismatched"]),
         unknown=int(row["unknown"]),
         side_correctness_rate=_maybe_float(row["side_correctness_rate"]),
-        warnings=(),
+        warnings=warnings,
         verdicts=tuple(json.loads(str(row["aggregate_verdict_json"] or "[]"))),
     )
 
@@ -4224,7 +4609,7 @@ def _outsample_variant_rows(
         "all": sorted_rows,
     }
     output = []
-    for label, predicate in _frozen_outsample_variants():
+    for label, predicate in _frozen_outsample_variants(candidate_name):
         output.append(
             {
                 "label": label,
@@ -4237,9 +4622,9 @@ def _outsample_variant_rows(
     return output, sorted_rows
 
 
-def _frozen_outsample_variants() -> list[tuple[str, object]]:
+def _frozen_outsample_variants(candidate_name: str = "conservative-entry-30-70") -> list[tuple[str, object]]:
     return [
-        ("base conservative-entry-30-70", lambda row: True),
+        (f"base {candidate_name}", lambda row: True),
         ("expiry-90-150", lambda row: 90 <= row.seconds_to_expiry <= 150),
         ("UP-only entry-0.40-0.70", lambda row: row.side == "UP" and 0.40 <= row.entry_price <= 0.70),
         ("entry-0.40-0.50", lambda row: 0.40 <= row.entry_price < 0.50),
@@ -4262,10 +4647,15 @@ def _frozen_outsample_variants() -> list[tuple[str, object]]:
 def _outsample_metrics_for_rows(store: SQLiteStore, base_rows, predicate) -> dict:
     selected_rows = []
     session_metrics: list[ConservativeSessionRow] = []
+    quality_warning_sessions = 0
+    quality_warning_trades = 0
     for base_row in base_rows:
         _run, signal_rows = load_signal_audit_rows(store, str(base_row["run_id"]))
         selected = [row for row in signal_rows if predicate(row)]
         selected_rows.extend(selected)
+        if "EXCHANGE_PRICE_QUALITY_WARNING" in tuple(json.loads(str(base_row["warnings_json"] or "[]"))):
+            quality_warning_sessions += 1
+            quality_warning_trades += len(selected)
         session_metrics.append(
             _outsample_session_metric(
                 session_id=str(base_row["session_id"]),
@@ -4307,6 +4697,8 @@ def _outsample_metrics_for_rows(store: SQLiteStore, base_rows, predicate) -> dic
         "losing_sessions": losing_sessions,
         "sessions_with_closed": sessions_with_closed,
         "trend": trend,
+        "quality_warning_sessions": quality_warning_sessions,
+        "quality_warning_trades": quality_warning_trades,
     }
     metrics["verdicts"] = _outsample_verdict(metrics)
     return metrics
@@ -4381,7 +4773,7 @@ def _build_outsample_report_text(
         f"Source filter: {source_filter}",
         f"Candidate: {candidate_name}",
         f"Cutoff: {cutoff.isoformat()}",
-        "Frozen variants: " + ", ".join(label for label, _predicate in _frozen_outsample_variants()),
+        "Frozen variants: " + ", ".join(label for label, _predicate in _frozen_outsample_variants(candidate_name)),
     ]
     if not rows:
         lines.append("Candidate cache is incomplete. Run validate-candidate first.")
@@ -4400,26 +4792,29 @@ def _build_outsample_report_text(
 
 
 def _outsample_metric_line(label: str, metrics: dict) -> str:
-    return " | ".join(
-        [
-            label,
-            f"sessions={metrics['sessions_tested']}",
-            f"accepted={metrics['accepted_trades']}",
-            f"closed={metrics['closed_trades']}",
-            f"realized_pnl={_fmt_money(metrics['realized_pnl'])}",
-            f"win_rate={float(metrics['win_rate']):.2%}",
-            f"expectancy={_fmt_money(metrics['expectancy'])}",
-            f"side_correctness={_fmt_pct(metrics['side_correctness_rate'])}",
-            f"top_1={_fmt_pct(metrics['top_1_trade_pct'])}",
-            f"pnl_ex_top_3={_fmt_money(metrics['pnl_excluding_top_3'])}",
-            f"max_drawdown={_fmt_money(metrics['max_drawdown'])}",
-            f"max_exposure={_fmt_money(metrics['max_exposure'])}",
-            f"profitable_sessions={metrics['profitable_sessions']}",
-            f"losing_sessions={metrics['losing_sessions']}",
-            f"trend={metrics['trend']}",
-            f"verdicts={', '.join(metrics['verdicts'])}",
-        ]
-    )
+    parts = [
+        label,
+        f"sessions={metrics['sessions_tested']}",
+        f"accepted={metrics['accepted_trades']}",
+        f"closed={metrics['closed_trades']}",
+        f"realized_pnl={_fmt_money(metrics['realized_pnl'])}",
+        f"win_rate={float(metrics['win_rate']):.2%}",
+        f"expectancy={_fmt_money(metrics['expectancy'])}",
+        f"side_correctness={_fmt_pct(metrics['side_correctness_rate'])}",
+        f"top_1={_fmt_pct(metrics['top_1_trade_pct'])}",
+        f"pnl_ex_top_3={_fmt_money(metrics['pnl_excluding_top_3'])}",
+        f"max_drawdown={_fmt_money(metrics['max_drawdown'])}",
+        f"max_exposure={_fmt_money(metrics['max_exposure'])}",
+        f"profitable_sessions={metrics['profitable_sessions']}",
+        f"losing_sessions={metrics['losing_sessions']}",
+        f"trend={metrics['trend']}",
+        f"verdicts={', '.join(metrics['verdicts'])}",
+    ]
+    if metrics.get("quality_warning_sessions", 0) > 0:
+        parts.append("EXCHANGE_PRICE_QUALITY_WARNING")
+        parts.append(f"quality_warning_sessions={metrics['quality_warning_sessions']}")
+        parts.append(f"quality_warning_trades={metrics['quality_warning_trades']}")
+    return " | ".join(parts)
 
 
 def _build_validation_target_text(
@@ -4803,6 +5198,59 @@ def _load_replay_context(
     )
 
 
+def _cached_replay_context(
+    store: SQLiteStore,
+    config: AgentConfig,
+    *,
+    source_filter: str | None,
+    since: datetime | None,
+    until: datetime | None,
+    session_id: str | None,
+    active_only: bool,
+    min_seconds_to_expiry: int | None,
+    max_seconds_to_expiry: int | None,
+    replay_context_cache: dict[tuple[object, ...], tuple] | None,
+):
+    if replay_context_cache is None:
+        return _load_replay_context(
+            store,
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+            config=config,
+            active_only=active_only,
+            min_seconds_to_expiry=min_seconds_to_expiry,
+            max_seconds_to_expiry=max_seconds_to_expiry,
+        )
+    key = (
+        source_filter,
+        session_id,
+        since.isoformat() if since is not None else None,
+        until.isoformat() if until is not None else None,
+        active_only,
+        min_seconds_to_expiry,
+        max_seconds_to_expiry,
+        config.max_market_duration_minutes,
+    )
+    cached = replay_context_cache.get(key)
+    if cached is not None:
+        return cached
+    loaded = _load_replay_context(
+        store,
+        source_filter=source_filter,
+        since=since,
+        until=until,
+        session_id=session_id,
+        config=config,
+        active_only=active_only,
+        min_seconds_to_expiry=min_seconds_to_expiry,
+        max_seconds_to_expiry=max_seconds_to_expiry,
+    )
+    replay_context_cache[key] = loaded
+    return loaded
+
+
 def _stored_settlement_prices(
     store: SQLiteStore,
     source_filter: str | None = None,
@@ -4810,47 +5258,24 @@ def _stored_settlement_prices(
     until: datetime | None = None,
     session_id: str | None = None,
 ):
-    clauses = ["snapshot_type = 'settlement_price'", "status = 'ok'"]
-    params = []
-    if source_filter == "demo":
-        clauses.append("source_name LIKE ?")
-        params.append("mock:%")
-    elif source_filter == "public":
-        clauses.append("source_name NOT LIKE ?")
-        params.append("mock:%")
-    if session_id is not None:
-        clauses.append("session_id = ?")
-        params.append(session_id)
-    if since is not None:
-        clauses.append("observed_at >= ?")
-        params.append(since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
-    if until is not None:
-        clauses.append("observed_at <= ?")
-        params.append(until.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))
-    rows = store.rows(
-        f"""
-        SELECT asset, payload_json, observed_at, source_name
-        FROM raw_snapshots
-        WHERE {' AND '.join(clauses)}
-        ORDER BY observed_at DESC, id DESC
-        """,
-        tuple(params),
-    )
-    import json
-
-    output = {}
-    for row in rows:
-        asset = str(row["asset"])
-        if asset in output:
-            continue
-        payload = json.loads(str(row["payload_json"]))
-        output[asset] = type("_ReplayPrice", (), {
-            "asset": asset,
-            "price": float(payload["price"]),
-            "timestamp": row["observed_at"],
-            "source": row["source_name"],
-        })()
-    return output
+    return {
+        asset: type(
+            "_ReplayPrice",
+            (),
+            {
+                "asset": asset,
+                "price": snapshot.price,
+                "timestamp": snapshot.timestamp.isoformat().replace("+00:00", "Z"),
+                "source": snapshot.source,
+            },
+        )()
+        for asset, snapshot in store.settlement_price_snapshots(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+        ).items()
+    }
 
 
 def _log_market_raw_snapshots(
@@ -5130,6 +5555,8 @@ def _apply_named_preset(config: AgentConfig, preset: str) -> AgentConfig:
         "conservative-tiny": "conservative-tiny-momentum",
         "conservative-tiny-reverse": "conservative-tiny-reverse",
         "conservative-entry-30-70": "conservative-entry-30-70",
+        "conservative-entry-40-75": "conservative-entry-40-75",
+        "conservative-up-only-40-75": "conservative-up-only-40-75",
     }
     if preset in mapping:
         return _apply_momentum_preset(config, mapping[preset])
@@ -5168,6 +5595,35 @@ def _apply_momentum_preset(config: AgentConfig, preset: str) -> AgentConfig:
             momentum_duration_filter="5m",
             momentum_min_entry_price=0.30,
             momentum_max_entry_price=0.70,
+            min_edge=max(base.min_edge, 0.03),
+            max_spread=min(base.max_spread, 0.02),
+            max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),
+            min_seconds_to_expiry=60,
+            max_seconds_to_expiry=180,
+        )
+    if preset == "conservative-entry-40-75":
+        return _replace_config_values(
+            base,
+            momentum_preset="conservative-entry-40-75",
+            momentum_asset_filter="BTC",
+            momentum_duration_filter="5m",
+            momentum_min_entry_price=0.40,
+            momentum_max_entry_price=0.75,
+            min_edge=max(base.min_edge, 0.03),
+            max_spread=min(base.max_spread, 0.02),
+            max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),
+            min_seconds_to_expiry=60,
+            max_seconds_to_expiry=180,
+        )
+    if preset == "conservative-up-only-40-75":
+        return _replace_config_values(
+            base,
+            momentum_preset="conservative-up-only-40-75",
+            momentum_asset_filter="BTC",
+            momentum_duration_filter="5m",
+            momentum_side_filter="UP",
+            momentum_min_entry_price=0.40,
+            momentum_max_entry_price=0.75,
             min_edge=max(base.min_edge, 0.03),
             max_spread=min(base.max_spread, 0.02),
             max_total_exposure_usd=min(base.max_total_exposure_usd, 5.0),

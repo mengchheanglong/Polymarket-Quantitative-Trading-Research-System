@@ -180,6 +180,10 @@ python -m src.main conservative-report --source public
 python -m src.main validate-conservative --source public
 python -m src.main validate-conservative --preset conservative-entry-30-70 --source public
 python -m src.main preset-report --preset conservative-entry-30-70 --source public
+python -m src.main validate-candidate --candidate conservative-entry-40-75 --source public
+python -m src.main candidate-report --candidate conservative-entry-40-75 --source public
+python -m src.main validate-candidate --candidate conservative-up-only-40-75 --source public
+python -m src.main candidate-report --candidate conservative-up-only-40-75 --source public
 python -m src.main replay --strategy momentum --preset conservative-tiny-reverse --source public --session-id <session_id> --active-only --close-mode approximate-expiry
 python -m src.main side-sweep --source public
 python -m src.main candidate-ranking --source public
@@ -189,7 +193,14 @@ python -m src.main strict-candidate-sweep --candidate conservative-entry-30-70 -
 python -m src.main strict-candidate-ranking --source public
 python -m src.main outsample-report --source public --since 2026-05-07T12:00:00Z
 python -m src.main validation-target --source public --since 2026-05-07T12:00:00Z
+python -m src.main consistency-audit --run-id <run_id>
 ```
+
+Final archive note:
+
+- The current momentum candidates are not live-ready and did not clear out-of-sample directional validation.
+- Use [docs/FINAL_STATUS.md](docs/FINAL_STATUS.md) before resuming the project.
+- Do not add wallet support, private keys, signing, authenticated trading APIs, or order execution to this repository.
 
 Inspect skip reasons and market-level diagnostics:
 
@@ -208,6 +219,7 @@ Phase 20 adds degradation and strict-candidate audit commands for `conservative-
 
 The `55%` side-correctness threshold is only a research continuation gate. Do not treat it as live readiness. A stronger paper-promising bar should include `100+` closed trades, `58-60%+` side correctness, positive expectancy, positive PnL excluding top trades, and no degrading trend.
 Phase 21 adds out-of-sample validation. Pick an ISO cutoff after the sessions used to discover the variants, then run `outsample-report` and `validation-target`. The frozen variants are evaluated before and after that cutoff so later sessions test the hypothesis instead of re-optimizing it.
+Phase 22 adds a consistency audit for approximate-expiry accounting. If a run shows positive PnL with `0%` side correctness, run `consistency-audit` first, then refresh candidate caches with `validate-candidate --refresh` and `candidate-report --refresh` before trusting the updated summaries.
 
 Run a research-only threshold sweep on stored snapshots:
 
@@ -288,7 +300,9 @@ Public discovery process:
 - `conservative-tiny-reverse` and `--reverse-signal` are paper-only research tools. They use the same tiny risk controls and entry filters, but flip `UP` to `DOWN` and `DOWN` to `UP` so the repo can test whether the conservative momentum side is backward.
 - `side-sweep` compares the normal conservative branch, the reverse branch, and tighter filtered variants such as higher edge, lower spread, narrower entry-price bands, asset filters, side filters, duration filters, and tighter expiry windows.
 - `candidate-ranking` ranks those paper candidates by side correctness, expectancy, closed trades, PnL excluding top trades, concentration, drawdown, exposure, and verdicts.
-- `conservative-entry-30-70` is the current main paper validation candidate. It is still paper-only and still not live-ready. Use `validate-conservative --preset conservative-entry-30-70 --source public` and `preset-report --preset conservative-entry-30-70 --source public` to track progress toward the paper-readiness gate.
+- `conservative-entry-30-70` is the older main paper validation candidate. It remains useful as a baseline, but recent cached comparisons showed its directional quality lagging stricter entry filters.
+- `conservative-entry-40-75` is the current stricter paper hypothesis. It keeps BTC-only, 5-minute, tiny-risk, `min_edge=0.03`, `max_spread=0.02`, and the `60-180` second expiry window, but uses entry prices from `0.40` to `0.75`.
+- `conservative-up-only-40-75` adds an `UP` side filter to the same `0.40-0.75` entry band. It is an experimental paper-only check for whether DOWN-side momentum is degrading the candidate.
 - `close-divergence` compares trade-level outcomes between `mark-to-market` and `approximate-expiry` on the same stored session.
 - `momentum-audit` runs paper-only filter experiments such as `UP` only, `DOWN` only, `BTC` only, `ETH` only, `5m` only, `15m` only, tighter expiry windows, and the `balanced-tiny-momentum` / `conservative-tiny-momentum` research presets.
 - Tiny momentum remains under audit. Positive mark-to-market output is not enough if approximate-expiry is weak or directionally wrong.

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import sqlite3
 import json
+import os
+import sqlite3
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -306,6 +308,10 @@ CREATE INDEX IF NOT EXISTS idx_raw_snapshots_source_type_observed
     ON raw_snapshots (source_name, snapshot_type, observed_at);
 CREATE INDEX IF NOT EXISTS idx_raw_snapshots_session_source_type_time
     ON raw_snapshots (session_id, source_name, snapshot_type, observed_at);
+CREATE INDEX IF NOT EXISTS idx_raw_snapshots_type_status_asset_time
+    ON raw_snapshots (snapshot_type, status, asset, observed_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_snapshots_type_status_session_asset_time
+    ON raw_snapshots (snapshot_type, status, session_id, asset, observed_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_session_observed
     ON discovered_markets (session_id, observed_at);
 CREATE INDEX IF NOT EXISTS idx_discovered_markets_source_observed
@@ -339,6 +345,8 @@ class SQLiteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        self._exchange_quality_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._settlement_price_cache: dict[tuple[Any, ...], dict[str, PriceSnapshot]] = {}
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()
@@ -382,6 +390,10 @@ class SQLiteStore:
             if column not in trades_cols:
                 self.conn.execute(ddl)
 
+    def _invalidate_exchange_quality_cache(self) -> None:
+        self._exchange_quality_cache.clear()
+        self._settlement_price_cache.clear()
+
     def close(self) -> None:
         self.conn.close()
 
@@ -397,6 +409,7 @@ class SQLiteStore:
             ),
         )
         self.conn.commit()
+        self._invalidate_exchange_quality_cache()
 
     def log_raw_snapshot(
         self,
@@ -427,6 +440,7 @@ class SQLiteStore:
             ),
         )
         self.conn.commit()
+        self._invalidate_exchange_quality_cache()
 
     def log_candles(
         self,
@@ -1164,6 +1178,25 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> PriceSnapshot | None:
+        exchange_state = self._exchange_price_quality_state(
+            asset=asset,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=since,
+            until=until,
+        )
+        if exchange_state["raw_count"] > 0:
+            selected_key = "clean_events" if source_prefix else "selected_events"
+            selected = [
+                event
+                for event in exchange_state[selected_key]
+                if event["asset"] == asset
+                and (source_prefix is None or str(event["source_name"]).startswith(source_prefix))
+            ]
+            if selected:
+                return _price_snapshot_from_event(max(selected, key=lambda item: item["observed_at"]))
+            if source_filter == "public" or any(not _is_demo_source(str(event["source_name"])) for event in exchange_state["events"]):
+                return None
         clauses = ["asset = ?"]
         params: list[Any] = [asset]
         if source_prefix:
@@ -1216,6 +1249,27 @@ class SQLiteStore:
         source_filter: str | None = None,
         session_id: str | None = None,
     ) -> PriceSnapshot | None:
+        exchange_state = self._exchange_price_quality_state(
+            asset=asset,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=None,
+            until=None,
+        )
+        if exchange_state["raw_count"] > 0:
+            candidate_prices: list[tuple[float, datetime, PriceSnapshot]] = []
+            for event in exchange_state["selected_events"]:
+                if event["asset"] != asset:
+                    continue
+                observed_at = event["observed_at"]
+                delta = abs((observed_at - target).total_seconds())
+                if delta <= max_delta_seconds:
+                    candidate_prices.append((delta, observed_at, _price_snapshot_from_event(event)))
+            if candidate_prices:
+                _, _, snapshot = min(candidate_prices, key=lambda item: (item[0], -item[1].timestamp()))
+                return snapshot
+            if source_filter == "public" or any(not _is_demo_source(str(event["source_name"])) for event in exchange_state["events"]):
+                return None
         clauses = ["asset = ?"]
         params: list[Any] = [asset]
         source_clause, source_params = _source_sql("source", source_filter)
@@ -1235,7 +1289,6 @@ class SQLiteStore:
             tuple(params),
         )
         candidate_prices: list[tuple[float, datetime, PriceSnapshot]] = []
-        candidate_rows = []
         for row in rows:
             try:
                 observed_at = _from_iso(str(row["observed_at"]))
@@ -1288,6 +1341,25 @@ class SQLiteStore:
         until: datetime | None = None,
         session_id: str | None = None,
     ) -> dict[str, PriceSnapshot]:
+        exchange_state = self._exchange_price_quality_state(
+            asset=None,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=since,
+            until=until,
+        )
+        if exchange_state["raw_count"] > 0:
+            latest: dict[str, PriceSnapshot] = {}
+            selected_key = "clean_events" if source_prefix else "selected_events"
+            for event in exchange_state[selected_key]:
+                if source_prefix and not str(event["source_name"]).startswith(source_prefix):
+                    continue
+                snapshot = _price_snapshot_from_event(event)
+                existing = latest.get(snapshot.asset.value)
+                if existing is None or snapshot.timestamp > existing.timestamp:
+                    latest[snapshot.asset.value] = snapshot
+            if latest or source_filter == "public" or any(not _is_demo_source(str(event["source_name"])) for event in exchange_state["events"]):
+                return latest
         clauses: list[str] = []
         params: list[Any] = []
         if source_prefix:
@@ -1337,6 +1409,226 @@ class SQLiteStore:
             if existing is None or snapshot.timestamp > existing.timestamp:
                 latest[snapshot.asset.value] = snapshot
         return latest
+
+    def exchange_price_quality_summary(
+        self,
+        *,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
+        asset: str | None = None,
+    ) -> dict[str, Any]:
+        state = self._exchange_price_quality_state(
+            asset=asset,
+            source_filter=source_filter,
+            session_id=session_id,
+            since=since,
+            until=until,
+        )
+        return {
+            "raw_snapshot_count": state["raw_count"],
+            "divergence_count": state["divergence_count"],
+            "max_divergence_abs": state["max_divergence_abs"],
+            "max_divergence_pct": state["max_divergence_pct"],
+            "stale_repeat_count_by_source": dict(state["stale_repeat_count_by_source"]),
+            "suspect_snapshot_count_by_source": dict(state["suspect_snapshot_count_by_source"]),
+            "cycles_excluded_due_to_exchange_quality": state["cycles_excluded_due_to_exchange_quality"],
+            "source_snapshot_counts": dict(state["source_snapshot_counts"]),
+            "latest_visible_by_source": {
+                key: value["observed_at"].isoformat().replace("+00:00", "Z")
+                for key, value in state["latest_clean_by_source"].items()
+            },
+            "affected_sources": sorted(
+                {
+                    *state["stale_repeat_count_by_source"].keys(),
+                    *state["suspect_snapshot_count_by_source"].keys(),
+                }
+            ),
+            "safe_for_replay": state["raw_count"] == 0 or state["cycles_excluded_due_to_exchange_quality"] == 0,
+        }
+
+    def settlement_price_snapshots(
+        self,
+        *,
+        source_filter: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, PriceSnapshot]:
+        key = (
+            source_filter,
+            session_id,
+            _iso(since) if since is not None else None,
+            _iso(until) if until is not None else None,
+        )
+        cached = self._settlement_price_cache.get(key)
+        if cached is not None:
+            return cached
+        clauses = ["snapshot_type = 'settlement_price'", "status = 'ok'", "asset IS NOT NULL"]
+        params: list[Any] = []
+        source_clause, source_params = _source_sql("source_name", source_filter)
+        if source_clause:
+            clauses.append(source_clause)
+            params.extend(source_params)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if since is not None:
+            clauses.append("observed_at >= ?")
+            params.append(_iso(since))
+        if until is not None:
+            clauses.append("observed_at <= ?")
+            params.append(_iso(until))
+        where = " AND ".join(clauses)
+        rows = self.rows(
+            f"""
+            SELECT asset, payload_json, observed_at, source_name
+            FROM (
+                SELECT asset, payload_json, observed_at, source_name,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY asset
+                           ORDER BY observed_at DESC, id DESC
+                       ) AS rownum
+                FROM raw_snapshots
+                WHERE {where}
+            )
+            WHERE rownum = 1
+            ORDER BY asset
+            """,
+            tuple(params),
+        )
+        snapshots: dict[str, PriceSnapshot] = {}
+        for row in rows:
+            snapshot = _settlement_snapshot_from_raw_row(row)
+            if snapshot is not None:
+                snapshots[snapshot.asset.value] = snapshot
+        self._settlement_price_cache[key] = snapshots
+        return snapshots
+
+    def _exchange_price_quality_state(
+        self,
+        *,
+        asset: str | None,
+        source_filter: str | None,
+        session_id: str | None,
+        since: datetime | None,
+        until: datetime | None,
+    ) -> dict[str, Any]:
+        key = (
+            asset,
+            source_filter,
+            session_id,
+            _iso(since) if since is not None else None,
+            _iso(until) if until is not None else None,
+            _exchange_max_divergence_pct(),
+        )
+        cached = self._exchange_quality_cache.get(key)
+        if cached is not None:
+            return cached
+        clauses, params = _exchange_quality_where_clauses(asset, source_filter, session_id, since, until)
+        rows = self.rows(
+            f"""
+            SELECT observed_at, asset, source_name, payload_json
+            FROM raw_snapshots
+            WHERE {' AND '.join(clauses)}
+            ORDER BY observed_at ASC, id ASC
+            """,
+            params,
+        )
+        threshold = _exchange_max_divergence_pct()
+        events: list[dict[str, Any]] = []
+        source_snapshot_counts: dict[str, int] = defaultdict(int)
+        for row in rows:
+            event = _exchange_quality_event_from_row(row)
+            if event is None:
+                continue
+            source_snapshot_counts[str(event["source_name"])] += 1
+            events.append(event)
+
+        grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+        for event in events:
+            grouped[str(event["asset"])][event["observed_at"].isoformat()].append(event)
+
+        divergence_count = 0
+        max_divergence_abs = 0.0
+        max_divergence_pct = 0.0
+        stale_repeat_count_by_source: dict[str, int] = defaultdict(int)
+        suspect_snapshot_count_by_source: dict[str, int] = defaultdict(int)
+        selected_events: list[dict[str, Any]] = []
+        clean_events: list[dict[str, Any]] = []
+        latest_clean_by_source: dict[str, dict[str, Any]] = {}
+        cycles_excluded_due_to_exchange_quality = 0
+
+        for asset_value, cycle_map in grouped.items():
+            previous_by_source: dict[str, dict[str, Any]] = {}
+            for observed_key in sorted(cycle_map):
+                cycle_events = cycle_map[observed_key]
+                cycle_divergent = False
+                for index, event in enumerate(cycle_events):
+                    for other in cycle_events[index + 1 :]:
+                        abs_diff = abs(float(event["price"]) - float(other["price"]))
+                        pct_diff = _relative_price_diff(float(event["price"]), float(other["price"]))
+                        if pct_diff > threshold:
+                            cycle_divergent = True
+                            event["divergence_pct"] = max(float(event["divergence_pct"]), pct_diff)
+                            other["divergence_pct"] = max(float(other["divergence_pct"]), pct_diff)
+                            event["divergence_abs"] = max(float(event["divergence_abs"]), abs_diff)
+                            other["divergence_abs"] = max(float(other["divergence_abs"]), abs_diff)
+                            max_divergence_abs = max(max_divergence_abs, abs_diff)
+                            max_divergence_pct = max(max_divergence_pct, pct_diff)
+                if cycle_divergent:
+                    divergence_count += 1
+                for event in cycle_events:
+                    source_name = str(event["source_name"])
+                    prev_self = previous_by_source.get(source_name)
+                    repeated = prev_self is not None and abs(float(prev_self["price"]) - float(event["price"])) < 1e-12
+                    moved_other = False
+                    if repeated:
+                        for other in cycle_events:
+                            if other is event:
+                                continue
+                            prev_other = previous_by_source.get(str(other["source_name"]))
+                            if float(other["divergence_pct"]) > threshold:
+                                moved_other = True
+                                break
+                            if prev_other is not None and _relative_price_diff(float(other["price"]), float(prev_other["price"])) > threshold:
+                                moved_other = True
+                                break
+                    event["stale_repeat"] = repeated and moved_other
+                    event["divergent"] = float(event["divergence_pct"]) > threshold
+                    event["suspect"] = bool(event["stale_repeat"] or (event["divergent"] and event["timestamp_suspect"]))
+                    if event["stale_repeat"]:
+                        stale_repeat_count_by_source[source_name] += 1
+                    if event["suspect"]:
+                        suspect_snapshot_count_by_source[source_name] += 1
+                    if not event["suspect"]:
+                        clean_events.append(event)
+                        latest_clean_by_source[f"{source_name}:{asset_value}"] = event
+                selected = _select_visible_exchange_event(cycle_events)
+                if selected is None and cycle_divergent:
+                    cycles_excluded_due_to_exchange_quality += 1
+                if selected is not None:
+                    selected_events.append(selected)
+                for event in cycle_events:
+                    previous_by_source[str(event["source_name"])] = event
+
+        state = {
+            "events": events,
+            "raw_count": len(events),
+            "selected_events": selected_events,
+            "clean_events": clean_events,
+            "divergence_count": divergence_count,
+            "max_divergence_abs": max_divergence_abs,
+            "max_divergence_pct": max_divergence_pct,
+            "stale_repeat_count_by_source": dict(sorted(stale_repeat_count_by_source.items())),
+            "suspect_snapshot_count_by_source": dict(sorted(suspect_snapshot_count_by_source.items())),
+            "cycles_excluded_due_to_exchange_quality": cycles_excluded_due_to_exchange_quality,
+            "source_snapshot_counts": dict(sorted(source_snapshot_counts.items())),
+            "latest_clean_by_source": latest_clean_by_source,
+        }
+        self._exchange_quality_cache[key] = state
+        return state
 
     def _raw_exchange_price_candidates(
         self,
@@ -1770,6 +2062,12 @@ class SQLiteStore:
         markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
         discovered_rows = self.discovered_market_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         latest_prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        exchange_quality = self.exchange_price_quality_summary(
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+        )
         raw_asset_clauses = ["snapshot_type = 'exchange_price'", "asset IS NOT NULL"]
         raw_asset_params: list[Any] = []
         raw_source_clause, raw_source_params = _source_sql("source_name", source_filter)
@@ -1892,6 +2190,12 @@ class SQLiteStore:
             "missing_prices": missing_prices,
             "wide_spreads": wide_spreads,
             "low_liquidity_markets": low_liquidity,
+            "exchange_divergence_count": exchange_quality["divergence_count"],
+            "exchange_max_divergence_abs": exchange_quality["max_divergence_abs"],
+            "exchange_max_divergence_pct": exchange_quality["max_divergence_pct"],
+            "exchange_stale_repeat_count_by_source": exchange_quality["stale_repeat_count_by_source"],
+            "exchange_suspect_snapshot_count_by_source": exchange_quality["suspect_snapshot_count_by_source"],
+            "exchange_cycles_excluded_due_to_quality": exchange_quality["cycles_excluded_due_to_exchange_quality"],
             "skipped_by_reason": {str(row["reason"]): int(row["count"]) for row in skip_rows},
             "source_coverage": dict(sorted(coverage.items())),
         }
@@ -1966,6 +2270,7 @@ class SQLiteStore:
         prices = self.latest_prices(source_filter=source_filter, since=since, until=until, session_id=session_id)
         discovered = self._discovered_market_aggregate_rows(source_filter=source_filter, since=since, until=until, session_id=session_id)
         markets = self.collected_markets(source_filter=source_filter, since=since, until=until, session_id=session_id)
+        quality = self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)
         orderbooks = [
             self.collected_orderbook(token_id, source_filter=source_filter, since=since, until=until, session_id=session_id)
             for market in markets
@@ -2023,11 +2328,12 @@ class SQLiteStore:
             "market_count": len(directional or markets),
             "orderbook_count": sum(1 for book in orderbooks if book is not None),
             "exchange_price_count": summary["exchange_price_snapshots"],
-            "wide_spreads": self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)["wide_spreads"],
-            "missing_orderbooks": self.data_quality_metrics(source_filter=source_filter, since=since, until=until, session_id=session_id)["missing_orderbooks"],
+            "wide_spreads": quality["wide_spreads"],
+            "missing_orderbooks": quality["missing_orderbooks"],
             "token_count": len(token_ready),
             "timestamps_overlap": bool(market_assets & price_assets),
             "minimum_snapshot_count_met": summary["total_snapshots"] >= 3,
+            "exchange_price_quality_warning": quality["exchange_cycles_excluded_due_to_quality"] > 0,
         }
 
     def _visible_market_rows(
@@ -2191,6 +2497,7 @@ class SQLiteStore:
         ):
             self.conn.execute(f"DELETE FROM {table}")
         self.conn.commit()
+        self._invalidate_exchange_quality_cache()
 
     def rows(self, query: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         return list(self.conn.execute(query, params))
@@ -2201,6 +2508,127 @@ class SQLiteStore:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _exchange_max_divergence_pct() -> float:
+    try:
+        return float(os.environ.get("EXCHANGE_MAX_DIVERGENCE_PCT", "0.001"))
+    except ValueError:
+        return 0.001
+
+
+def _exchange_quality_where_clauses(
+    asset: str | None,
+    source_filter: str | None,
+    session_id: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[list[str], tuple[Any, ...]]:
+    clauses = ["snapshot_type = 'exchange_price'", "asset IS NOT NULL"]
+    params: list[Any] = []
+    if asset is not None:
+        clauses.append("asset = ?")
+        params.append(asset)
+    source_clause, source_params = _source_sql("source_name", source_filter)
+    if source_clause:
+        clauses.append(source_clause)
+        params.extend(source_params)
+    if session_id is not None:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if since is not None:
+        clauses.append("observed_at >= ?")
+        params.append(_iso(since))
+    if until is not None:
+        clauses.append("observed_at <= ?")
+        params.append(_iso(until))
+    return clauses, tuple(params)
+
+
+def _exchange_quality_event_from_row(row: sqlite3.Row) -> dict[str, Any] | None:
+    if row["asset"] is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except json.JSONDecodeError:
+        return None
+    price = payload.get("price")
+    if price is None:
+        return None
+    try:
+        observed_at = _from_iso(str(row["observed_at"]))
+    except ValueError:
+        return None
+    exchange_timestamp = None
+    exchange_timestamp_raw = payload.get("exchange_timestamp")
+    if isinstance(exchange_timestamp_raw, str):
+        try:
+            exchange_timestamp = _from_iso(exchange_timestamp_raw)
+        except ValueError:
+            exchange_timestamp = None
+    timestamp_age_seconds = (
+        abs((observed_at - exchange_timestamp).total_seconds())
+        if exchange_timestamp is not None
+        else None
+    )
+    return {
+        "asset": str(row["asset"]),
+        "observed_at": observed_at,
+        "source_name": str(row["source_name"]),
+        "price": float(price),
+        "exchange_timestamp": exchange_timestamp,
+        "timestamp_age_seconds": timestamp_age_seconds,
+        "timestamp_suspect": bool(timestamp_age_seconds is not None and timestamp_age_seconds > 300),
+        "divergence_pct": 0.0,
+        "divergence_abs": 0.0,
+        "stale_repeat": False,
+        "divergent": False,
+        "suspect": False,
+    }
+
+
+def _relative_price_diff(left: float, right: float) -> float:
+    scale = max(abs(left), abs(right), 1e-9)
+    return abs(left - right) / scale
+
+
+def _price_snapshot_from_event(event: dict[str, Any]) -> PriceSnapshot:
+    return PriceSnapshot(
+        asset=asset_enum(str(event["asset"])),
+        price=float(event["price"]),
+        timestamp=event["observed_at"],
+        source=str(event["source_name"]),
+    )
+
+
+def _select_visible_exchange_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not events:
+        return None
+    if len(events) == 1:
+        return None if bool(events[0]["suspect"]) else events[0]
+    ranked = sorted(events, key=_exchange_event_rank)
+    best = ranked[0]
+    if bool(best["suspect"]):
+        return None
+    if bool(best["divergent"]) and len(ranked) > 1:
+        next_rank = _exchange_event_rank(ranked[1])[:-1]
+        best_rank = _exchange_event_rank(best)[:-1]
+        if next_rank == best_rank:
+            return None
+    return best
+
+
+def _exchange_event_rank(event: dict[str, Any]) -> tuple[Any, ...]:
+    age = event["timestamp_age_seconds"]
+    return (
+        bool(event["suspect"]),
+        bool(event["divergent"]),
+        bool(event["stale_repeat"]),
+        bool(event["timestamp_suspect"]),
+        age is None,
+        float(age) if age is not None else 0.0,
+        str(event["source_name"]),
+    )
 
 
 def _from_iso(value: str) -> datetime:
@@ -2276,6 +2704,28 @@ def _price_snapshot_from_price_row(row: sqlite3.Row | None) -> PriceSnapshot | N
 
 
 def _price_snapshot_from_raw_row(row: sqlite3.Row | None) -> PriceSnapshot | None:
+    if row is None or row["asset"] is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except json.JSONDecodeError:
+        return None
+    price = payload.get("price")
+    if price is None:
+        return None
+    try:
+        observed_at = _from_iso(str(row["observed_at"]))
+    except ValueError:
+        return None
+    return PriceSnapshot(
+        asset=asset_enum(str(row["asset"])),
+        price=float(price),
+        timestamp=observed_at,
+        source=str(row["source_name"]),
+    )
+
+
+def _settlement_snapshot_from_raw_row(row: sqlite3.Row | None) -> PriceSnapshot | None:
     if row is None or row["asset"] is None:
         return None
     try:

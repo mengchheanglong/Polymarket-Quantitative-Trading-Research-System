@@ -9,12 +9,14 @@ from src.storage.sqlite import SQLiteStore
 
 @dataclass(frozen=True)
 class SignalAuditRow:
+    trade_id: str
     session_id: str | None
     run_id: str | None
     market_slug: str
     asset: str
     duration: str
     side: str
+    token_id: str
     entry_timestamp: datetime
     expiry_timestamp: datetime
     start_price: float | None
@@ -23,11 +25,14 @@ class SignalAuditRow:
     actual_result: str
     side_matched: bool | None
     entry_price: float
+    exit_price: float | None
     spread: float | None
     edge_at_entry: float | None
     seconds_to_expiry: float
     pnl: float | None
+    result: str | None
     close_mode: str | None
+    settlement_note: str | None
     pre_entry_exchange_move: float | None
     post_entry_exchange_move: float | None
 
@@ -80,19 +85,21 @@ def _signal_rows_for_records(
             source_filter=source_filter,
             session_id=session_id,
         )
-        actual_result = _actual_result(start_price.price if start_price else None, expiry_price.price if expiry_price else None)
+        actual_result = settlement_direction(start_price.price if start_price else None, expiry_price.price if expiry_price else None)
         side = str(trade["direction"])
-        side_matched = None if actual_result == "UNKNOWN" else side == actual_result
+        side_matched = settlement_match(side, start_price.price if start_price else None, expiry_price.price if expiry_price else None)
         opportunity = opportunity_map.get((str(trade["market_slug"]), side, str(trade["opened_at"])), {})
         entry_underlying_price = float(trade["entry_underlying_price"]) if trade["entry_underlying_price"] is not None else None
         rows.append(
             SignalAuditRow(
+                trade_id=str(trade["trade_id"]),
                 session_id=session_id,
                 run_id=str(run["run_id"]) if run["run_id"] else None,
                 market_slug=str(trade["market_slug"]),
                 asset=str(trade["asset"]),
                 duration=_duration_label(trade["window_start"], trade["window_end"]),
                 side=side,
+                token_id=str(trade["token_id"] or ""),
                 entry_timestamp=opened_at,
                 expiry_timestamp=window_end,
                 start_price=start_price.price if start_price else None,
@@ -101,11 +108,14 @@ def _signal_rows_for_records(
                 actual_result=actual_result,
                 side_matched=side_matched,
                 entry_price=float(trade["entry_price"]),
+                exit_price=float(trade["exit_price"]) if trade["exit_price"] is not None else None,
                 spread=_float_or_none(opportunity.get("spread")),
                 edge_at_entry=_float_or_none(opportunity.get("edge")),
                 seconds_to_expiry=max(0.0, (window_end - opened_at).total_seconds()),
                 pnl=float(trade["pnl"]) if trade["pnl"] is not None else None,
+                result=str(trade["result"]) if trade["result"] is not None else None,
                 close_mode=close_mode,
+                settlement_note=str(trade["settlement_note"]) if trade["settlement_note"] is not None else None,
                 pre_entry_exchange_move=_pct_move(
                     start_price.price if start_price else None,
                     entry_underlying_price,
@@ -248,14 +258,27 @@ def _accepted_opportunity_map(store: SQLiteStore, run_id: str) -> dict[tuple[str
     }
 
 
-def _actual_result(start_price: float | None, expiry_price: float | None) -> str:
+def settlement_direction(start_price: float | None, expiry_price: float | None) -> str:
     if start_price is None or expiry_price is None:
         return "UNKNOWN"
-    if expiry_price > start_price:
-        return "UP"
-    if expiry_price < start_price:
-        return "DOWN"
-    return "FLAT"
+    return "UP" if expiry_price >= start_price else "DOWN"
+
+
+def settlement_value_for_side(side: str, start_price: float | None, expiry_price: float | None) -> float | None:
+    if start_price is None or expiry_price is None:
+        return None
+    if side == "UP":
+        return 1.0 if expiry_price >= start_price else 0.0
+    if side == "DOWN":
+        return 1.0 if expiry_price < start_price else 0.0
+    return None
+
+
+def settlement_match(side: str, start_price: float | None, expiry_price: float | None) -> bool | None:
+    value = settlement_value_for_side(side, start_price, expiry_price)
+    if value is None:
+        return None
+    return value == 1.0
 
 
 def _correctness_breakdown(

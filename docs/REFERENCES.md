@@ -26,6 +26,8 @@ These are design references only. They do not authorize live trading, wallet sup
 - Also useful for: promoting one stricter paper preset as the main candidate while still forcing aggregate skepticism checks such as side correctness, PnL excluding top trades, and closed-trade-count progress before treating it as promising.
 - Also useful for: degradation audits and stricter paper-only candidate searches that compare early vs recent sessions, matched vs mismatched accepted trades, stricter entry bands, side filters, edge thresholds, spread thresholds, and expiry windows without changing strategy behavior or adding execution.
 - Also useful for: out-of-sample validation design, including freezing candidate variants before collecting more data and separating in-sample discovery from later-session validation.
+- Also useful for: accounting consistency audits where candidate-side correctness, approximate-expiry settlement, token mapping, and realized PnL must agree before cached validation metrics are trusted.
+- Also useful for: promoting a stricter entry-band paper hypothesis such as `conservative-entry-40-75` or `conservative-up-only-40-75` only after cached comparisons, exact preset validation, and out-of-sample checks agree.
 - Do not copy yet: exchange adapters, live order routers, credential handling, or deployment patterns for live bots.
 - Safety warning: use as architecture inspiration, not as permission to add exchange execution.
 - Phase: Phase 2 and Phase 3 for reporting, replay, and dry-run inspiration; Phase 6 for source-aware replay and dataset validation; later for richer backtesting design.
@@ -66,6 +68,7 @@ Useful ideas:
 - candidate-promotion ideas: giving the best paper-only filter set an explicit preset name, then validating it session by session instead of treating side-sweep output as the final workflow
 - degradation-audit ideas: checking whether a promoted paper candidate is weakening as new sessions arrive, and requiring higher standards than a small positive PnL before continuing research
 - out-of-sample validation ideas: freezing an interesting paper filter set, then evaluating it on sessions after a cutoff instead of continually re-optimizing old data
+- consistency-audit ideas: verifying that settlement direction, trade side, payout, and reported side correctness use the same paper-only semantics, and forcing cache refresh after accounting fixes
 
 Do not copy yet:
 - live execution
@@ -81,6 +84,8 @@ Relevant future phases:
 - Phase 18+: reverse-signal research, side-correctness deep audit, and paper candidate ranking without adding any execution path
 - Phase 20+: degradation audit and stricter paper-only candidate search for the promoted conservative-entry candidate
 - Phase 21+: out-of-sample validation and target tracking for frozen paper variants
+- Phase 22+: settlement, side-correctness, and PnL consistency auditing for approximate-expiry candidate validation
+- Current candidate workflow: `conservative-entry-40-75` and `conservative-up-only-40-75` are frozen paper-only follow-ups to the weaker `conservative-entry-30-70` baseline.
 - Phase 17+: live-executor design review, separate from paper engine
 
 Source: https://github.com/aulekator/Polymarket-BTC-15-Minute-Trading-Bot.git

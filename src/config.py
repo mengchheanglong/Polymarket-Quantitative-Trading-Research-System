@@ -65,6 +65,7 @@ class AgentConfig:
     clob_base_url: str = "https://clob.polymarket.com"
     coinbase_base_url: str = "https://api.exchange.coinbase.com"
     kraken_base_url: str = "https://api.kraken.com"
+    exchange_max_divergence_pct: float = 0.001
 
 
 def load_dotenv(path: Path = Path(".env")) -> None:
@@ -144,4 +145,5 @@ def load_config() -> AgentConfig:
             "COINBASE_BASE_URL", "https://api.exchange.coinbase.com"
         ),
         kraken_base_url=os.environ.get("KRAKEN_BASE_URL", "https://api.kraken.com"),
+        exchange_max_divergence_pct=float(os.environ.get("EXCHANGE_MAX_DIVERGENCE_PCT", "0.001")),
     )

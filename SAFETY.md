@@ -2,6 +2,8 @@
 
 Phase 1 is paper-only by design.
 
+Final status: this repository is archived as a paper-only research reference. The observed public-data strategies did not clear out-of-sample directional validation, and no live-trading work should be built on top of the current candidates.
+
 - `DRY_RUN` defaults to `true`.
 - Any attempt to set `DRY_RUN=false` exits with a safety error.
 - Any live-trading flag such as `LIVE_TRADING=true`, `ALLOW_LIVE_TRADING=true`, `POLYMARKET_LIVE=true`, or `REAL_TRADES=true` exits with a safety error.
@@ -36,13 +38,14 @@ Phase 1 is paper-only by design.
 - `markov-report` and `stuck-markov` are paper-only analytics over stored market snapshots. They do not query authenticated APIs, do not place orders, and do not convert public observations into a live system.
 - `signal-audit`, `close-divergence`, and `momentum-audit` are paper-only audit commands. They replay stored snapshots or inspect stored runs only.
 - `conservative-tiny` is a paper-only preset. It narrows momentum research to a smaller, stricter subset of the stored public market windows, but it does not create any execution path.
-- `conservative-entry-30-70` is also a paper-only preset. It is the current main validation candidate, but it still only narrows stored-snapshot replay and does not add any execution path.
+- `conservative-entry-30-70`, `conservative-entry-40-75`, and `conservative-up-only-40-75` are paper-only presets. They only narrow stored-snapshot replay filters and do not add any execution path.
 - `conservative-tiny-reverse` and `--reverse-signal` are paper-only research toggles. They flip the paper momentum side after the signal is computed, but they still use stored snapshots, paper balances, and paper-only close modes.
 - `conservative-report` is a paper-only validation command. It replays stored sessions with the conservative preset only, aggregates skepticism metrics such as top-trade concentration and side correctness, and never calls authenticated APIs.
 - `preset-report`, `compare-candidates`, and `validate-conservative --preset ...` are also paper-only. They may create additional stored replay runs, but only by replaying already-collected public snapshots inside SQLite. They still cannot place orders or touch authenticated APIs.
 - `side-audit`, `side-sweep`, and `candidate-ranking` are paper-only directional audit commands. They inspect stored conservative runs, compare normal vs reversed paper signals, and rank paper candidates without creating any execution path.
 - `degradation-audit`, `strict-candidate-sweep`, and `strict-candidate-ranking` are paper-only skepticism commands for the current `conservative-entry-30-70` candidate. They read cached paper summaries, stored runs, trades, and accepted-trade audit rows. They do not collect new market data, do not promote a live strategy, and do not add execution capability.
 - `outsample-report` and `validation-target` are paper-only validation commands. They freeze a small set of candidate variants, split stored sessions by an ISO cutoff, and report whether later sessions support or reject the paper hypothesis. They do not change strategy logic or create any live path.
+- `consistency-audit` is a paper-only accounting check. It compares approximate-expiry settlement inputs, chosen side, token mapping, exit payout, and realized PnL for each closed trade. It exists to catch report inconsistencies, not to create any execution capability.
 - Tail-risk warnings such as `TAIL_RISK_CONCENTRATED_PROFIT` and `LOW_PRICE_BINARY_TAIL_STRATEGY` are there to stop a misleading paper result from being mistaken for a stable edge.
 - Tiny momentum is not trusted just because mark-to-market looks positive. Phase 15 explicitly checks accepted-trade edge, side correctness at approximate expiry, and whether close-mode disagreement is large enough to invalidate the paper result.
 - Run IDs isolate paper experiments so reports do not accidentally mix unrelated strategy runs.
@@ -68,6 +71,8 @@ Report metrics are paper metrics only:
 - `PAPER_PROMISING` is a research verdict, not a go-live decision. It is only a stricter paper-screening label and still does not authorize live trading, wallet setup, signing, or order execution.
 - A `55%` side-correctness gate is only a research-continuation checkpoint. Higher paper standards should require larger samples, stronger side correctness, positive expectancy, positive PnL after excluding top trades, and no degrading trend before even discussing separate live-system design.
 - Out-of-sample validation is still paper validation. Freezing a variant before collecting new data reduces overfitting risk, but it still does not authorize wallets, credentials, signing, authenticated APIs, or order execution.
+- Positive PnL with `0%` side correctness is a red flag. Phase 22 adds consistency auditing and cache refresh requirements specifically so suspicious accounting can be corrected before a candidate report is interpreted.
+- The stricter `0.40-0.75` entry presets are research hypotheses only. Higher side correctness in cached comparison output is not live-readiness; it must survive out-of-sample validation with enough closed trades and clean exchange-quality diagnostics.
 
 Data quality metrics are paper research diagnostics only. They report snapshot counts, failed collection attempts, stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, missing prices, missing orderbooks, wide spreads, low liquidity, and skipped fake opportunities by reason.
 

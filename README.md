@@ -4,6 +4,19 @@ This is a safety-first paper-trading research agent for BTC/ETH Polymarket UP/DO
 
 It is intentionally not a trading bot. It cannot submit orders, does not manage wallets, does not require a wallet, does not require a private key, does not require Polymarket trading credentials, and defaults to `DRY_RUN=true`.
 
+## Final Research Status
+
+This repository is currently archived as a paper-only research reference. The collection, replay, reporting, exchange-quality, and candidate-validation infrastructure works, but the tested momentum candidates did not survive out-of-sample validation strongly enough to justify more work toward live trading.
+
+Latest conclusion:
+
+- `conservative-entry-40-75` and `conservative-up-only-40-75` remained positive in aggregate but degraded out of sample.
+- Directional correctness fell back toward the research-failure zone after clean 5-hour and 10-hour BTC-only observe sessions.
+- No candidate reached the paper-promising bar.
+- The project should not be used for live trading.
+
+See [docs/FINAL_STATUS.md](docs/FINAL_STATUS.md) for the archival summary and resume instructions.
+
 ## Recommended Smoke Test
 
 ```powershell
@@ -387,6 +400,37 @@ The frozen variants are not optimized dynamically:
 `outsample-report` separates in-sample sessions before the cutoff from out-of-sample sessions after the cutoff. `OUTSAMPLE_PROMISING` requires at least 30 out-of-sample closed trades, side correctness of at least `58%`, positive expectancy, positive PnL excluding top 3 trades, top-1 contribution below `40%`, no degrading trend, and at least `60%` profitable out-of-sample sessions.
 
 This is still paper-only validation. Freezing variants helps reduce overfitting, but even a passing out-of-sample report would still be research evidence, not permission to trade real money.
+
+Phase 22 adds settlement and side-correctness consistency auditing:
+
+```powershell
+python -m src.main consistency-audit --run-id <run_id>
+python -m src.main consistency-audit --session-id <session_id> --candidate conservative-entry-30-70 --source public
+```
+
+This command checks that approximate-expiry settlement, chosen side, token mapping, and realized PnL agree at the trade level. Positive PnL with `0%` side correctness is treated as suspicious and should trigger a consistency audit before any candidate metrics are trusted.
+
+Candidate summaries should be refreshed after accounting changes:
+
+```powershell
+python -m src.main validate-candidate --candidate conservative-entry-30-70 --source public --refresh
+python -m src.main candidate-report --candidate conservative-entry-30-70 --source public --refresh
+```
+
+This project remains paper-only. Refreshing cached summaries does not create any live-trading path.
+
+The current candidate workflow also includes two frozen follow-up presets from the strict comparison results:
+
+```powershell
+python -m src.main replay --strategy momentum --preset conservative-entry-40-75 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main replay --strategy momentum --preset conservative-up-only-40-75 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+python -m src.main validate-candidate --candidate conservative-entry-40-75 --source public
+python -m src.main validate-candidate --candidate conservative-up-only-40-75 --source public
+python -m src.main candidate-report --candidate conservative-entry-40-75 --source public
+python -m src.main candidate-report --candidate conservative-up-only-40-75 --source public
+```
+
+`conservative-entry-40-75` keeps the same BTC-only, 5-minute, tiny-risk, `min_edge=0.03`, `max_spread=0.02`, and `60-180` second expiry window as `conservative-entry-30-70`, but narrows entries to `0.40-0.75`. `conservative-up-only-40-75` adds an `UP` side filter on top of that. These are paper-only hypotheses for out-of-sample validation, not live-ready strategies.
 
 ## Observe And Dataset Building
 

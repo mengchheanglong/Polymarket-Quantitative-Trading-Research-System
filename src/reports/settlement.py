@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from src.reports.signal_audit import settlement_direction
 from src.storage.sqlite import SQLiteStore
 
 
@@ -100,55 +101,28 @@ def _nearest_price(
     session_id: str | None,
     max_delta_seconds: int = 300,
 ) -> _NearestPrice | None:
-    clauses = ["asset = ?"]
-    params: list[object] = [asset]
-    if source_filter == "demo":
-        clauses.append("source LIKE ?")
-        params.append("mock:%")
-    elif source_filter == "public":
-        clauses.append("source NOT LIKE ?")
-        params.append("mock:%")
-    if session_id is not None:
-        clauses.append("session_id = ?")
-        params.append(session_id)
-    rows = store.rows(
-        f"""
-        SELECT asset, price, observed_at, source
-        FROM price_snapshots
-        WHERE {' AND '.join(clauses)}
-        ORDER BY observed_at DESC, id DESC
-        """,
-        tuple(params),
+    snapshot = store.nearest_price(
+        asset,
+        target,
+        max_delta_seconds=max_delta_seconds,
+        source_filter=source_filter,
+        session_id=session_id,
     )
-    candidates: list[_NearestPrice] = []
-    for row in rows:
-        try:
-            observed_at = _parse_iso(str(row["observed_at"]))
-        except ValueError:
-            continue
-        delta_seconds = abs((observed_at - target).total_seconds())
-        if delta_seconds <= max_delta_seconds:
-            candidates.append(
-                _NearestPrice(
-                    price=float(row["price"]),
-                    observed_at=observed_at,
-                    source=str(row["source"]),
-                    delta_seconds=delta_seconds,
-                )
-            )
-    if not candidates:
+    if snapshot is None:
         return None
-    return min(candidates, key=lambda item: (item.delta_seconds, -item.observed_at.timestamp()))
+    return _NearestPrice(
+        price=snapshot.price,
+        observed_at=snapshot.timestamp,
+        source=snapshot.source,
+        delta_seconds=abs((snapshot.timestamp - target).total_seconds()),
+    )
 
 
 def _settlement_result(start_price: _NearestPrice | None, end_price: _NearestPrice | None) -> str:
-    if start_price is None or end_price is None:
-        return "UNKNOWN"
-    if end_price.price > start_price.price:
-        return "UP"
-    if end_price.price < start_price.price:
-        return "DOWN"
-    return "FLAT"
+    return settlement_direction(
+        start_price.price if start_price is not None else None,
+        end_price.price if end_price is not None else None,
+    )
 
 
 def _confidence_for(start_price: _NearestPrice | None, end_price: _NearestPrice | None) -> tuple[str, str]:

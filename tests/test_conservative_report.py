@@ -41,6 +41,38 @@ def test_conservative_entry_30_70_named_preset():
     assert preset.max_seconds_to_expiry == 180
 
 
+def test_conservative_entry_40_75_named_preset():
+    preset = _apply_named_preset(AgentConfig(), "conservative-entry-40-75")
+    assert preset.tiny_profile is True
+    assert preset.momentum_preset == "conservative-entry-40-75"
+    assert preset.momentum_asset_filter == "BTC"
+    assert preset.momentum_duration_filter == "5m"
+    assert preset.momentum_side_filter is None
+    assert preset.momentum_min_entry_price == 0.40
+    assert preset.momentum_max_entry_price == 0.75
+    assert preset.min_edge == 0.03
+    assert preset.max_spread == 0.02
+    assert preset.max_total_exposure_usd == 5.0
+    assert preset.min_seconds_to_expiry == 60
+    assert preset.max_seconds_to_expiry == 180
+
+
+def test_conservative_up_only_40_75_named_preset():
+    preset = _apply_named_preset(AgentConfig(), "conservative-up-only-40-75")
+    assert preset.tiny_profile is True
+    assert preset.momentum_preset == "conservative-up-only-40-75"
+    assert preset.momentum_asset_filter == "BTC"
+    assert preset.momentum_duration_filter == "5m"
+    assert preset.momentum_side_filter == "UP"
+    assert preset.momentum_min_entry_price == 0.40
+    assert preset.momentum_max_entry_price == 0.75
+    assert preset.min_edge == 0.03
+    assert preset.max_spread == 0.02
+    assert preset.max_total_exposure_usd == 5.0
+    assert preset.min_seconds_to_expiry == 60
+    assert preset.max_seconds_to_expiry == 180
+
+
 def test_conservative_readiness_verdicts():
     assert conservative_readiness_verdict(
         closed_trades=60,
@@ -179,6 +211,8 @@ def test_candidate_indexes_and_summary_cache(tmp_path):
             )
         }
         assert "idx_raw_snapshots_session_source_type_time" in indexes
+        assert "idx_raw_snapshots_type_status_asset_time" in indexes
+        assert "idx_raw_snapshots_type_status_session_asset_time" in indexes
         assert "idx_runs_strategy_source_session_notes" in indexes
         assert "idx_trades_run_status" in indexes
         assert "idx_opportunities_run_reason" in indexes
@@ -187,6 +221,38 @@ def test_candidate_indexes_and_summary_cache(tmp_path):
         assert store.rows("SELECT COUNT(*) AS count FROM candidate_aggregate_summaries")[0]["count"] == 1
     finally:
         store.close()
+
+
+def test_candidate_ranking_reuses_replay_contexts(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.68, include_settlement=True)
+
+    from src import main as main_module
+
+    original = main_module._load_replay_context
+    calls: list[tuple[str | None, int | None, int | None]] = []
+
+    def wrapped(store, config, source_filter=None, since=None, until=None, session_id=None, active_only=False, min_seconds_to_expiry=None, max_seconds_to_expiry=None):
+        calls.append((session_id, min_seconds_to_expiry, max_seconds_to_expiry))
+        return original(
+            store,
+            config,
+            source_filter=source_filter,
+            since=since,
+            until=until,
+            session_id=session_id,
+            active_only=active_only,
+            min_seconds_to_expiry=min_seconds_to_expiry,
+            max_seconds_to_expiry=max_seconds_to_expiry,
+        )
+
+    monkeypatch.setattr(main_module, "_load_replay_context", wrapped)
+
+    assert main(["--db", str(db_path), "candidate-ranking", "--source", "public"]) == 0
+    output = capsys.readouterr().out
+    assert "Candidate ranking" in output
+    assert len(calls) <= 6
 
 
 def test_candidate_report_uses_cache_and_refresh_does_not_duplicate_runs(tmp_path, capsys):
@@ -303,6 +369,8 @@ def test_preset_report_and_compare_candidates(tmp_path, capsys):
     assert "Candidate comparison" in compare_output
     assert "conservative-tiny" in compare_output
     assert "conservative-entry-30-70" in compare_output
+    assert "conservative-entry-40-75" in compare_output
+    assert "conservative-up-only-40-75" in compare_output
     assert "reverse conservative" in compare_output
     assert "entry-0.40-0.75" in compare_output
     assert "DOWN-only" in compare_output
@@ -360,6 +428,40 @@ def test_candidate_alias_commands_and_export(tmp_path, capsys):
     assert "runs.csv" in exported
     runs_text = (out_dir / "runs.csv").read_text(encoding="utf-8")
     assert "conservative-entry-30-70" in runs_text
+
+
+def test_new_candidate_alias_commands(tmp_path, capsys):
+    db_path = tmp_path / "paper.sqlite3"
+    _seed_session_dataset(db_path, include_end_price=True, later_midpoint=0.70, include_settlement=True)
+
+    for candidate in ("conservative-entry-40-75", "conservative-up-only-40-75"):
+        assert main(
+            [
+                "--db",
+                str(db_path),
+                "validate-candidate",
+                "--candidate",
+                candidate,
+                "--source",
+                "public",
+            ]
+        ) == 0
+        validate_output = capsys.readouterr().out
+        assert f"Preset: {candidate}" in validate_output
+
+        assert main(
+            [
+                "--db",
+                str(db_path),
+                "candidate-report",
+                "--candidate",
+                candidate,
+                "--source",
+                "public",
+            ]
+        ) == 0
+        report_output = capsys.readouterr().out
+        assert f"Preset name: {candidate}" in report_output
 
 
 def test_validation_export_package(tmp_path):

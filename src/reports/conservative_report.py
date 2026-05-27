@@ -98,6 +98,8 @@ def build_conservative_report(
 
     lines.append("Aggregate conservative result:")
     lines.append(_aggregate_line(aggregate_row))
+    if aggregate_row.warnings:
+        lines.append("Warnings: " + ", ".join(aggregate_row.warnings))
     profitable_sessions = sum(1 for row in session_rows if row.realized_pnl > 0)
     losing_sessions = sum(1 for row in session_rows if row.realized_pnl < 0)
     lines.append("Paper-readiness progress:")
