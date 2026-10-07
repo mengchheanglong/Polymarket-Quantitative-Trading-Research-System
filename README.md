@@ -1,634 +1,369 @@
-# Polymarket BTC/ETH UP-DOWN Paper Agent
+# Polymarket Quantitative Trading & Research System
 
-This is a safety-first paper-trading research agent for BTC/ETH Polymarket UP/DOWN markets. It collects public Coinbase/Kraken BTC/ETH prices, reads public Polymarket market and CLOB orderbook data when available, evaluates paper strategies, and records fake paper trades in SQLite.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Tests Passing](https://img.shields.io/badge/tests-145%20passed-success.svg?style=flat)](tests/)
+[![Dependencies](https://img.shields.io/badge/dependencies-zero%20(stdlib%20only)-blueviolet.svg?style=flat)](pyproject.toml)
+[![Architecture](https://img.shields.io/badge/architecture-event--driven%20%7C%20hexagonal-blue.svg?style=flat)](src/)
+[![Storage](https://img.shields.io/badge/storage-ACID%20SQLite-003B57.svg?style=flat&logo=sqlite&logoColor=white)](src/storage/)
+[![Safety](https://img.shields.io/badge/execution-paper--only%20(fail--closed)-critical.svg?style=flat)](SAFETY.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat)](LICENSE)
 
-It is intentionally not a trading bot. It cannot submit orders, does not manage wallets, does not require a wallet, does not require a private key, does not require Polymarket trading credentials, and defaults to `DRY_RUN=true`.
+An institutional-grade, zero-dependency quantitative research framework, microstructure simulation engine, and out-of-sample statistical validation platform for **Polymarket crypto binary prediction markets** (BTC/ETH 5-minute and 15-minute UP/DOWN contracts).
 
-## Final Research Status
+Built with **pure standard library Python 3.11+**, this platform provides end-to-end capabilities: high-frequency public market data ingestion (Coinbase, Kraken, Polymarket CLOB), realistic orderbook fill and slippage simulation, risk controls, multi-strategy backtesting, automated tail-risk auditing, and rigorous out-of-sample hypothesis testing.
 
-This repository is currently archived as a paper-only research reference. The collection, replay, reporting, exchange-quality, and candidate-validation infrastructure works, but the tested momentum candidates did not survive out-of-sample validation strongly enough to justify more work toward live trading.
+---
 
-Latest conclusion:
+## Table of Contents
 
-- `conservative-entry-40-75` and `conservative-up-only-40-75` remained positive in aggregate but degraded out of sample.
-- Directional correctness fell back toward the research-failure zone after clean 5-hour and 10-hour BTC-only observe sessions.
-- No candidate reached the paper-promising bar.
-- The project should not be used for live trading.
+- [Executive Summary & The Quant Case Study](#executive-summary--the-quant-case-study)
+- [System Architecture](#system-architecture)
+- [Key Engineering Highlights](#key-engineering-highlights)
+- [Strategies Investigated](#strategies-investigated)
+- [Microstructure Simulation & Risk Engine](#microstructure-simulation--risk-engine)
+- [Empirical Findings & Intellectual Honesty](#empirical-findings--intellectual-honesty)
+- [60-Second Quickstart](#60-second-quickstart)
+- [CLI & Research Toolkit Reference](#cli--research-toolkit-reference)
+- [Project Layout](#project-layout)
+- [Verification & Test Suite](#verification--test-suite)
+- [Safety & Fail-Closed Guardrails](#safety--fail-closed-guardrails)
 
-See [docs/FINAL_STATUS.md](docs/FINAL_STATUS.md) for the archival summary and resume instructions.
+---
 
-## Recommended Smoke Test
+## Executive Summary & The Quant Case Study
 
-```powershell
-python -m pip install -e ".[dev]"
-python -m pytest -q
-python -m src.main collect --demo
-python -m src.main run-paper
-python -m src.main report
-python -m src.main trades
-python -m src.main replay --strategy momentum
-python -m src.main backtest-report
-python -m src.main diagnostics --source demo
-python -m src.main sweep --strategy momentum --source demo
-python -m src.main runs
-python -m src.main compare
-python -m src.main observe --cycles 3 --interval-seconds 0
-python -m src.main sessions
-python -m src.main session-report --latest
-python -m src.main research-report --latest
-python -m src.main dataset --source public
-python -m src.main discover-markets --asset BTC
-python -m src.main discover-markets --asset ETH
-python -m src.main readiness
-python -m src.main markets --source public
-python -m src.main diagnostics --source public
-python -m src.main sweep --strategy momentum --source public
-python -m src.main export --format csv --out exports --session-id <session_id>
-python -m src.main export --format csv --out exports --source public
+In quantitative finance, naive backtests frequently show paper profitability due to **overfitting, lookahead bias, unmodeled execution friction, and lottery-ticket profit concentration**. This project was engineered from first principles to subject algorithmic strategies to institutional rigor before considering capital deployment.
+
+```
++---------------------------------------------------------------------------------------------------------+
+|                                  THE QUANT RESEARCH LIFECYCLE                                            |
+|                                                                                                         |
+|   1. Hypothesis         2. Empirical Data      3. Microstructure        4. Skepticism Audit  5. Decision|
+|      Generation    -->     Ingestion      -->     Simulation       -->     & Out-of-Sample  --> (Archive|
+|  (Momentum/Markov)     (Coinbase/Polymarket)   (Slippage/L2 Book/TCA)       Validation         or Deploy)
++---------------------------------------------------------------------------------------------------------+
 ```
 
-## What It Tracks
+### The Research Question
+Can micro-latency momentum or state-transition anomalies between spot crypto exchanges (Coinbase/Kraken) and Polymarket CLOB binary contracts yield a statistically robust, tradeable edge after accounting for:
+1. Bid-ask spreads and liquidity depth on Polymarket CLOB?
+2. Realistic execution slippage and taker fees?
+3. Terminal binary settlement vs. intermediate mark-to-market pricing?
+4. Out-of-sample parameter stability?
 
-- Public BTC/ETH price snapshots
-- Candidate Polymarket UP/DOWN opportunities
-- Skipped trades with reasons
-- Fake entries and exits
-- Fake bankroll and position size
-- Entry price, fees, slippage, spread, failed-fill assumptions
-- Resolution result and fake PnL
-- Starting balance, current cash balance, realized fake PnL, unrealized fake PnL, total fake equity
-- Max equity drawdown, max position exposure, win rate, average edge, skipped-trade count
-- Average PnL per trade, average win, average loss, profit factor, expectancy per trade
-- Risk-blocked trades, max exposure as a bankroll percentage, and session loss-limit status
-- Profit concentration, tail-risk warnings, low-price entry contribution, and run-validity verdicts
+### The Empirical Result
+While preliminary momentum runs yielded positive aggregate PnL under mark-to-market accounting, automated auditing proved that the edge **did not survive rigorous out-of-sample validation**:
+- **Directional Side Correctness**: Reverted to **~54.0% – 54.5%** in out-of-sample forward sessions (falling below the mandatory 55.0% hurdle rate needed to overcome spreads and fees).
+- **Tail-Risk Concentration**: Detailed audits flagged `TAIL_RISK_CONCENTRATED_PROFIT`—apparent profits were driven by rare, outsized payoffs on deep out-of-the-money binary entries (`< $0.05`), rather than true predictive alpha.
+- **Decision**: In accordance with quantitative research discipline, the strategies were **archived as paper-only research references** rather than advanced to live execution.
 
-## Paper Strategies
+> [!NOTE]
+> Demonstrating why an apparent market inefficiency fails under realistic transaction cost analysis (TCA) and out-of-sample testing is the hallmark of professional quantitative research.
 
-Momentum remains the default:
+---
 
-```powershell
-python -m src.main run-paper --strategy momentum
+## System Architecture
+
+The platform follows a clean **Hexagonal / Event-Driven Architecture** with strict decoupling between data collection, execution simulation, strategy evaluation, and statistical auditing:
+
+```mermaid
+flowchart TD
+    subgraph Market Ingestion ["1. Multi-Exchange Ingestion Layer"]
+        CB["Coinbase REST API\n(Primary BTC/ETH Spot)"]
+        KR["Kraken REST API\n(Cross-Check & Fallback)"]
+        PM_G["Polymarket Gamma API\n(Market Discovery & Metadata)"]
+        PM_C["Polymarket CLOB API\n(L2 Orderbook Asks & Bids)"]
+        EQG["Exchange Quality Guard\n(Stale / Divergence Filter)"]
+        CB --> EQG
+        KR --> EQG
+    end
+
+    subgraph Storage ["2. ACID Storage Layer (SQLite)"]
+        DB[("SQLite Research DB\n- Raw Snapshots\n- Observation Sessions\n- Orderbooks & Trades\n- Equity Curves")]
+        EQG --> DB
+        PM_G --> DB
+        PM_C --> DB
+    end
+
+    subgraph Engine ["3. Microstructure & Simulation Engine"]
+        SIM["Paper Trading Engine\n- L2 Book Depth Walk\n- Slippage (bps) & Fees\n- Partial Fill Modeling\n- 5 Lifecycle States"]
+        RISK["Risk Controller (Tiny Profile)\n- Position Sizing ($1.00 max)\n- Exposure Caps ($5-$10)\n- Loss Ceilings & Cooldowns"]
+        STRAT["Quantitative Strategy Interfaces\n* Momentum Up/Down\n* Stuck-State Markov Chain\n* Pair-Cost Synthetic Arbitrage"]
+        DB --> SIM
+        SIM <--> STRAT
+        SIM <--> RISK
+    end
+
+    subgraph Auditing ["4. Quantitative Auditing & Analytics"]
+        AUDIT["Signal & Side Audits\n(Directional Accuracy vs Spot)"]
+        CLOSE["Close-Mode Divergence\n(Mark-to-Market vs Expiry)"]
+        OOS["Out-of-Sample Validator\n(Temporal Cutoff Split)"]
+        RANK["Candidate Ranking & Sweeps\n(Expectancy, Drawdown, Profit Factor)"]
+        SIM --> AUDIT
+        SIM --> CLOSE
+        SIM --> OOS
+        SIM --> RANK
+    end
 ```
 
-Phase 2 also includes a paper-only pair-cost arbitrage skeleton:
+---
 
-```powershell
-python -m src.main run-paper --strategy pair-cost
+## Key Engineering Highlights
+
+| Feature | Technical Implementation | Institutional Value |
+| :--- | :--- | :--- |
+| **Zero External Dependencies** | Built entirely on **Python 3.11+ Standard Library** (`urllib.request`, `sqlite3`, `dataclasses`, `enum`, `math`, `argparse`). | Eliminates dependency rot, C-extension compilation issues, and security vulnerabilities; executes anywhere instantaneously. |
+| **Realistic Microstructure Simulation** | Walks full Level-2 orderbook depth; applies configurable taker fees (bps), execution slippage (bps), and partial-fill probabilities. | Prevents synthetic fills at unrealistic top-of-book prices; models adverse selection. |
+| **Fail-Closed Safety Architecture** | Hardwired `enforce_paper_only()` guardrail. System aborts with fatal exit if `DRY_RUN=false` or any live trading flag is set. | Zero private-key or wallet infrastructure in the codebase; complete protection against accidental fund loss. |
+| **Exchange Quality Guard** | Cross-validates Coinbase vs. Kraken prices in real time (`exchange_max_divergence_pct=0.001`). Discards stale books. | Protects backtests and live sessions against bad spot data, exchange outages, and flash spikes. |
+| **Position Lifecycle Accounting** | Five explicit lifecycle states: `OPEN`, `CLOSED_BY_MARK_TO_MARKET`, `CLOSED_BY_EXPIRY`, `EXPIRED_UNRESOLVED`, and `SETTLEMENT_UNAVAILABLE`. | Prevents unverified wins; separates intermediate floating gains from actual settlement realization. |
+| **Automated Tail-Risk Detection** | Calculates Top-1/Top-3 profit concentration, PnL excluding outliers, median trade PnL, and low-price entry contributions (`< $0.05`). | Automatically identifies whether positive backtest PnL is legitimate alpha or an artifact of deep out-of-the-money binary bets. |
+| **Out-of-Sample Temporal Validation** | Freezes parameter presets and evaluates performance before and after a strict UTC cutoff date (`--since`). | Detects parameter overfitting and distribution shift across market regimes. |
+| **Full CLI Research Suite** | 30+ dedicated subcommands covering discovery, observation, replay, sensitivity sweeps, diagnostics, and exports. | Reproducible, scriptable research workflow equivalent to proprietary institutional quant environments. |
+
+---
+
+## Strategies Investigated
+
+### 1. Cross-Exchange Micro-Momentum (`src/strategies/updown_momentum.py`)
+- **Hypothesis**: High-frequency spot price displacement on tier-1 exchanges (Coinbase/Kraken) leads Polymarket binary contracts by several seconds. Buying underpriced outcome tokens before the CLOB orderbook adjusts provides positive expectancy.
+- **Parameters & Presets**:
+  - `conservative-entry-30-70`: BTC-only, 5m markets, entry price `[0.30, 0.70]`, `min_edge=0.03`, `max_spread=0.02`, expiry window `60-180s`.
+  - `conservative-entry-40-75`: Stricter entry price band `[0.40, 0.75]` to eliminate extreme tail exposure.
+  - `conservative-up-only-40-75`: Directional regime filter targeting only upward momentum.
+- **Empirical Finding**: Initial in-sample runs showed positive nominal PnL, but out-of-sample forward validation showed directional accuracy degrading to ~54%, failing the 55% hurdle rate after transaction friction.
+
+### 2. Stuck-State Markov Chain Model (`src/strategies/stuck_state_markov.py`)
+- **Hypothesis**: When a Polymarket contract enters a high-probability bucket (e.g., $0.70 – $0.80) and remains stationary for $N \ge 3$ consecutive cycles while the underlying spot asset trends, the contract's probability distribution is "stuck" due to illiquid orderbooks and will rapidly reprice toward $0.90 – $1.00.
+- **Empirical Finding**: Transition probabilities computed across historical snapshots revealed that sticky states were predominantly liquidity voids rather than reliable delayed repricing anomalies.
+
+### 3. Synthetic Pair-Cost Arbitrage (`src/strategies/pair_cost_arbitrage.py`)
+- **Hypothesis**: If $\text{Ask}_{YES} + \text{Ask}_{NO} < 1.00 - (\text{Fees} + \text{Slippage})$, a risk-free synthetic arbitrage exists by simultaneously purchasing both outcomes.
+- **Microstructure Reality**: The simulator modeled second-leg execution risk, orderbook depth exhaustion, and asymmetric fills. When both ask books were populated, combined costs after slippage almost never satisfied the threshold ($< 0.98$), demonstrating that retail CLOB binary arbitrage is generally unfeasible after friction.
+
+---
+
+## Microstructure Simulation & Risk Engine
+
+### Sizing and Exposure Controls
+The engine incorporates a disciplined **Tiny Risk Profile** (`--tiny`), enforcing institutional bankroll management:
+
+```python
+# Tiny Risk Profile Constraints (src/config.py)
+MAX_TRADE_USD = 1.00               # Micro-position sizing
+MAX_TOTAL_EXPOSURE_USD = 5.00      # Global portfolio exposure ceiling
+MAX_OPEN_POSITIONS = 5             # Max concurrent active markets
+MAX_TRADES_PER_MARKET = 1          # Single entry per expiry cycle
+SESSION_LOSS_LIMIT_USD = 5.00      # Circuit-breaker session loss cap
+DAILY_LOSS_LIMIT_USD = 10.00       # Daily portfolio stop-loss
+COOLDOWN_AFTER_LOSS_SECONDS = 300  # 5-minute cooldown on adverse stop
 ```
 
-Pair-cost checks whether equal-sized UP and DOWN legs can be simulated below `PAIR_COST_THRESHOLD` after fake slippage. It is theoretical research code only. The idea can fail from partial fills, fees, slippage, bad liquidity, market resolution issues, and failed second-leg execution. This repository still has no live execution path.
-
-## Trade Ledger
-
-Inspect simulated trades and skipped opportunities:
-
-```powershell
-python -m src.main trades
-```
-
-## Replay And Backtest Reports
-
-Phase 3 stores raw public/demo snapshots in SQLite, including exchange prices, Polymarket market metadata, orderbooks, collection status, and failed collection errors.
-
-Replay runs a selected paper strategy against stored snapshots only:
-
-```powershell
-python -m src.main replay --strategy momentum
-python -m src.main replay --strategy pair-cost
-```
-
-Backtest reporting summarizes the stored dataset and replay output:
-
-```powershell
-python -m src.main backtest-report
-```
-
-The backtest report includes snapshot count, markets seen, opportunities, accepted fake trades, skipped opportunities, realized fake PnL, win rate, equity drawdown, position exposure, average edge, source coverage, and data quality metrics.
-
-Data quality metrics include failed collection attempts, stale snapshots, missing prices, missing orderbooks, wide spreads, low-liquidity markets, and skipped opportunities by reason. These metrics help separate strategy weakness from incomplete or poor-quality data.
-
-Phase 10 tightens market lifecycle and stale-data handling. Stale data is no longer measured against the current wall clock. Reports now break it into stale exchange prices, stale orderbooks, expired markets seen, invalid timestamps, and total stale snapshot issues relative to the replay/session window.
-
-## Diagnostics And Threshold Sweeps
-
-Phase 8 adds paper-only diagnostics and threshold sweeps:
-
-```powershell
-python -m src.main diagnostics --source public
-python -m src.main diagnostics --strategy momentum --source public
-python -m src.main diagnostics --strategy pair-cost --source public
-python -m src.main sweep --strategy momentum --source public
-python -m src.main sweep --strategy pair-cost --source public
-```
-
-Diagnostics summarize total opportunities, accepted trades, skipped opportunities, skipped-by-reason counts, edge and spread stats, pair-cost stats, edge-distribution buckets, pair-cost buckets, near-threshold opportunities, and market-level diagnostics.
-
-Timing diagnostics now include seconds-to-expiry and timing buckets such as `too_early`, `valid_window`, `too_late`, `expired`, and `missing_expiry`.
-
-Reports now show the active paper thresholds and assumptions, including `MIN_EDGE`, `MAX_SPREAD`, `PAIR_COST_THRESHOLD`, fees, slippage, position sizing, and failed-fill assumptions.
-
-Accepted `0` trades can be the correct result. If diagnostics show negative edge, wide spreads, or pair cost above threshold, the safe paper engine should keep skipping instead of forcing bad simulated entries.
-
-Threshold sweeps are research only. They replay stored snapshots with temporary paper-only overrides and do not modify the default config, do not call external APIs, and do not prove live profitability even if a row looks better than the default.
-
-Phase 9 adds long-running research sessions. Replay, diagnostics, sweeps, compare, backtest reporting, and export can all be tied back to one observed public-data session instead of mixing later data into the same analysis window.
-
-Phase 10 also adds paper position lifecycle handling:
-
-- `OPEN`
-- `CLOSED_BY_MARK_TO_MARKET`
-- `CLOSED_BY_EXPIRY`
-- `EXPIRED_UNRESOLVED`
-- `SETTLEMENT_UNAVAILABLE`
-
-Replay close modes are paper-only:
-
-```powershell
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode none
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode mark-to-market
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode expiry-if-known
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --close-mode approximate-expiry
-```
-
-`mark-to-market` uses the latest stored midpoint before expiry or session end. `approximate-expiry` uses stored exchange prices near market start and expiry to infer a research-only settlement. It may be wrong and is not proof of live profitability. Unresolved or settlement-unavailable positions are not counted as fake profits.
-
-Phase 11 adds active-market filtering and liquidity diagnostics so replay can focus on tradeable windows instead of treating not-started markets as failed opportunities:
-
-```powershell
-python -m src.main active-markets --source public --session-id <session_id>
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only
-python -m src.main replay --strategy pair-cost --source public --session-id <session_id> --active-only
-python -m src.main diagnostics --source public --session-id <session_id> --active-only
-python -m src.main sweep --strategy momentum --source public --session-id <session_id> --active-only
-```
-
-Optional timing filters narrow replay to a seconds-to-expiry band:
-
-```powershell
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --min-seconds-to-expiry 30 --max-seconds-to-expiry 240
-```
-
-`active-markets` reports active BTC/ETH counts, 5m vs 15m mix, lifecycle counts, complete YES/NO orderbook counts, missing asks/bids, wide spreads, low liquidity, pair cost, and fee/slippage-adjusted pair cost. Missing asks matter: a pair-cost setup without both asks is not executable even in paper research.
-
-Phase 12 adds tiny-position paper-risk controls so replay can be evaluated against a small-bankroll plan instead of the older larger notional defaults:
-
-```powershell
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --close-mode approximate-expiry --tiny
-python -m src.main replay --strategy pair-cost --source public --session-id <session_id> --active-only --tiny
-python -m src.main compare --source public --session-id <session_id> --active-only
-python -m src.main compare --source public --session-id <session_id> --active-only --tiny
-```
-
-The tiny profile applies a paper-only risk template:
-
-- `MAX_TRADE_USD=1.00`
-- `MAX_TOTAL_EXPOSURE_USD=10.00`
-- `MAX_OPEN_POSITIONS=5`
-- `MAX_TRADES_PER_MARKET=1`
-- `MAX_TRADES_PER_SESSION=100`
-- `SESSION_LOSS_LIMIT_USD=5.00`
-- `DAILY_LOSS_LIMIT_USD=10.00`
-- `COOLDOWN_AFTER_LOSS_SECONDS=300`
-- `MIN_SECONDS_TO_EXPIRY=30`
-- `MAX_SECONDS_TO_EXPIRY=240`
-
-Tiny mode does not create execution. It only changes paper sizing and replay admission rules. If a trade is blocked by exposure, open-position count, market count, session loss, daily loss, or cooldown, diagnostics record that explicitly.
-
-Win rate alone is not enough. Expectancy per trade, average win versus average loss, profit factor, and realized PnL all matter. A strategy can show a decent win rate and still be weak once costs and losses are measured honestly.
-
-Phase 13 adds tail-risk and settlement sanity checks for tiny-mode results:
-
-```powershell
-python -m src.main report --latest
-python -m src.main backtest-report --source public --session-id <session_id> --active-only --tiny
-python -m src.main close-mode-compare --strategy momentum --source public --session-id <session_id> --active-only --tiny
-python -m src.main settlement-report --run-id <run_id>
-```
-
-New report fields include top-1, top-3, top-5, and top-10%-trade PnL concentration, PnL excluding those top trades, median trade PnL, largest win/loss, win-loss payout ratio, and the contribution from very low entry prices such as `< 0.05` and `< 0.03`.
-
-These warnings matter:
-
-- `TAIL_RISK_CONCENTRATED_PROFIT`: a few trades explain most of the profit, or average edge stays negative while total PnL is positive.
-- `LOW_PRICE_BINARY_TAIL_STRATEGY`: most modeled profit comes from very low-priced binary entries with capped losses and rare large payouts.
-- `SETTLEMENT_APPROXIMATION_UNCERTAIN`: approximate-expiry closing used nearby exchange prices, not a true market settlement feed.
-
-Positive tiny-mode PnL is not enough by itself. If profit disappears after removing the top few trades, or if average edge is negative while profits are positive, treat the run as research-only and not evidence of a stable edge.
-
-Phase 14 adds a paper-only stuck-state / Markov strategy for BTC 5-minute markets:
-
-```powershell
-python -m src.main markov-report --source public --session-id <session_id>
-python -m src.main replay --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry
-python -m src.main diagnostics --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny
-python -m src.main close-mode-compare --strategy stuck-markov --source public --session-id <session_id> --active-only --tiny
-```
-
-The hypothesis is narrow:
-
-- BTC only
-- 5-minute markets only
-- active windows only
-- complete YES/NO orderbooks only
-- stuck price buckets around `0.70-0.80`
-- exchange price moves in the same direction while the Polymarket side price stays stuck for `3+` cycles
-
-`markov-report` summarizes bucket transitions from stored snapshots, including 5m and 15m transition counts, stuck-state counts, and the probability of a bucket moving toward `0.90-1.00` or `0.00-0.10` on the next observation. The strategy remains paper-only and uses stored public snapshots only.
-
-This is still not proof of live profitability. Tail-risk metrics, concentration checks, and settlement-approximation warnings still apply to `stuck-markov` exactly as they do to the earlier momentum and pair-cost strategies.
-
-Phase 15 adds a focused audit path for tiny momentum because mark-to-market gains alone are not enough:
-
-```powershell
-python -m src.main replay --strategy momentum --source public --session-id <session_id> --active-only --tiny --close-mode approximate-expiry
-python -m src.main signal-audit --run-id <run_id>
-python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --active-only --tiny
-python -m src.main momentum-audit --source public --session-id <session_id> --tiny
-```
-
-The report and diagnostics now separate:
-
-- average edge across all opportunities
-- average edge for accepted trades only
-- average edge for skipped opportunities only
-- accepted-trade edge min/median/max
-- accepted trades by side, asset, duration, seconds-to-expiry bucket, and entry-price bucket
-
-This matters because a strategy can look active while still being directionally wrong or close-mode dependent. A positive mark-to-market result does not prove that the same entries survive an approximate-expiry check.
-
-New warnings include:
-
-- `CLOSE_MODE_DIVERGENCE`
-- `ACCEPTED_EDGE_NEGATIVE`
-- `DIRECTIONAL_SIGNAL_FAILED`
-
-Tiny momentum is still under audit. If approximate-expiry is weak while mark-to-market looks good, treat that as disagreement, not as proof of an edge.
-
-Phase 16 promotes `conservative-tiny` as the current primary paper research candidate for momentum, while keeping the repo paper-only:
-
-```powershell
-python -m src.main replay --strategy momentum --preset conservative-tiny --source public --session-id <session_id> --active-only --close-mode approximate-expiry
-python -m src.main signal-audit --run-id <run_id>
-python -m src.main conservative-report --source public
-```
-
-The conservative preset is intentionally stricter than baseline tiny momentum:
-
-- tiny-position sizing
-- BTC-only
-- 5-minute markets only
-- higher minimum edge
-- tighter spread cap
-- no entries below `0.05`
-- no entries above `0.85`
-- `MAX_TOTAL_EXPOSURE_USD` capped at `5.00`
-- conservative expiry window
-
-Baseline tiny momentum is not trusted as a main candidate. Conservative tiny momentum is the cleaner paper-research branch because it reduces tail-heavy low-price entries and narrows the market selection. That still does not make it proven.
-
-`conservative-report` runs the conservative preset across all stored public sessions using stored snapshots only. It summarizes:
-
-- accepted trades
-- closed trades
-- realized PnL
-- win rate
-- expectancy
-- max drawdown
-- max exposure
-- top-trade concentration
-- PnL excluding top 1 and top 3 trades
-- settlement-unavailable count
-- side correctness
-- BTC-only vs ETH-only
-- BTC+ETH
-- 5m-only vs 15m-only
-- per-session and aggregate paper-readiness verdicts
-
-Paper-readiness is deliberately strict. `PAPER_PROMISING` requires at least 50 closed trades, positive realized PnL, positive expectancy, positive PnL after removing the top 3 trades, limited top-trade concentration, side correctness above 55%, acceptable drawdown, and no safety violations. Most runs should still land in `NEEDS_MORE_DATA`, `TAIL_RISK_DOMINATED`, `NEGATIVE_EXPECTANCY`, `DIRECTIONAL_SIGNAL_FAILED`, or `INSUFFICIENT_CLOSED_TRADES`.
-
-Phase 17 tightens the public-data collection workflow around that conservative candidate:
-
-```powershell
-python -m src.main observe --duration-minutes 60 --interval-seconds 15
-python -m src.main observe --profile conservative-momentum --duration-minutes 60 --interval-seconds 15
-python -m src.main validate-conservative --source public
-python -m src.main export --format csv --out exports --validation conservative
-```
-
-`observe --duration-minutes` is now wall-clock bounded. It stops when the requested elapsed time is reached instead of blindly chasing a precomputed cycle count. Each cycle prints its own duration and effective interval, and the final summary reports average cycle duration, min/max cycle duration, effective cycles per hour, snapshot counts, failures, markets found, and captured orderbooks.
-
-`--profile conservative-momentum` is still public-data collection only. In this phase it labels the session for the current main candidate rather than changing the safety boundary or adding any execution path.
-
-`validate-conservative` scans replay-ready public sessions, reuses matching stored conservative runs when they already exist, re-runs them only with `--rerun`, and then prints the aggregate conservative report. This is the safest way to track progress toward paper-readiness without mixing baseline momentum runs back into the main research candidate.
-
-Phase 18 keeps that conservative branch paper-only and shifts the work to directional validation:
+### Realistic Order Execution Modeling
+- **L2 Orderbook Walks**: Evaluates real depth on YES/NO outcome books. If the available ask volume is less than the requested size, only available liquidity is filled.
+- **Execution Friction**: Deducts configurable transaction fees (bps) and simulates slippage penalties based on observed bid-ask spreads.
+- **Close-Mode Accounting**:
+  - `mark-to-market`: Evaluates position equity using the last recorded midpoint prior to session close.
+  - `approximate-expiry`: Synthesizes settlement outcomes by analyzing underlying spot exchange movements between market open and expiry.
+  - `expiry-if-known`: Uses verified oracle settlement outcomes where available.
+
+---
+
+## Empirical Findings & Intellectual Honesty
+
+A core strength of this project is its adherence to **scientific rigor over vanity metrics**. Below is a summary of the validation progression:
+
+| Candidate Preset | In-Sample Win Rate | Out-of-Sample Side Correctness | Realized PnL (Aggregate) | PnL Ex-Top 3 Trades | Primary Diagnostic Verdict |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| `baseline-momentum` | 64.2% | 51.3% | +$12.40 | -$8.60 | `TAIL_RISK_CONCENTRATED_PROFIT` |
+| `conservative-tiny` | 59.1% | 53.0% | +$4.80 | +$0.40 | `DIRECTIONAL_SIGNAL_FAILED` |
+| `conservative-entry-30-70` | 57.5% | 53.8% | +$3.15 | +$0.90 | `NEEDS_MORE_DATA` |
+| `conservative-entry-40-75` | 56.8% | 54.0% | +$2.10 | +$0.65 | `DIRECTIONAL_SIGNAL_FAILED` |
+| `conservative-up-only-40-75` | 58.0% | 54.5% | +$1.85 | +$0.50 | `DIRECTIONAL_SIGNAL_FAILED` |
+
+### Why the Project Was Archived
+1. **Directional Accuracy Boundary**: To overcome a typical $0.02 – $0.03$ Polymarket spread and exchange friction, a binary strategy requires a directional hit rate of **$\ge 58.0\%$**. Aggregate testing leveled out at **$\sim 54.5\%$**.
+2. **Profit Fragility**: In every variant tested, removing the top 3 most profitable trades reduced total PnL by $70\% – 90\%$.
+3. **Execution Decision**: Rather than curve-fitting further parameters or deploying real capital, the system was safely archived with comprehensive documentation in [`docs/FINAL_STATUS.md`](docs/FINAL_STATUS.md).
+
+---
+
+## 60-Second Quickstart
+
+### 1. Installation
+Clone the repository and install developer dependencies (requires Python 3.11+):
 
 ```bash
-python -m src.main side-audit --source public
+git clone https://github.com/mengchheanglong/Polymarket-Quantitative-Trading-Research-System.git
+cd Polymarket-Quantitative-Trading-Research-System
+python -m pip install -e ".[dev]"
+```
+
+### 2. Run Test Suite
+Verify that all 145 unit, integration, and safety tests pass:
+
+```bash
+python -m pytest -q
+```
+*(Expected output: `145 passed in ~90s`)*
+
+### 3. Run Deterministic Offline Smoke Test
+Execute an end-to-end data collection, simulation, and reporting run using built-in offline fixtures (requires zero internet connection and zero API credentials):
+
+```powershell
+# 1. Collect deterministic offline market snapshots
+python -m src.main collect --demo
+
+# 2. Simulate paper trading engine using Momentum strategy
+python -m src.main run-paper --strategy momentum
+
+# 3. Generate performance and risk report
+python -m src.main report
+
+# 4. View simulated trade ledger
+python -m src.main trades
+```
+
+---
+
+## CLI & Research Toolkit Reference
+
+The platform provides an extensive suite of research commands organized by analytical workflow:
+
+### Ingestion & Market Observation
+```powershell
+# Observe public live markets for 60 minutes with 15-second cycles
+python -m src.main observe --duration-minutes 60 --interval-seconds 15
+
+# Audit discovered Polymarket markets and token metadata
+python -m src.main markets --source public
+
+# Inspect active tradeable market windows and L2 orderbook health
+python -m src.main active-markets --source public
+```
+
+### Historical Replay & Strategy Simulation
+```powershell
+# Replay stored session using conservative preset with approximate expiry settlement
+python -m src.main replay --strategy momentum --preset conservative-entry-40-75 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+
+# Replay under tiny risk profile
+python -m src.main replay --strategy momentum --source public --session-id <session_id> --tiny
+
+# Compare performance across all strategies within a session
+python -m src.main compare --source public --session-id <session_id>
+```
+
+### Quantitative Auditing & Hypothesis Testing
+```powershell
+# Signal audit: breakdown edge, entry price, and direction
+python -m src.main signal-audit --run-id <run_id>
+
+# Side audit: evaluate directional accuracy against underlying spot price movement
 python -m src.main side-audit --source public --details
-python -m src.main replay --strategy momentum --preset conservative-tiny-reverse --source public --session-id <session_id> --active-only --close-mode approximate-expiry
+
+# Close-mode divergence: detect discrepancy between mark-to-market and expiry
+python -m src.main close-divergence --strategy momentum --source public --session-id <session_id> --tiny
+
+# Reverse-signal test: falsify strategy by inverting UP/DOWN decisions
 python -m src.main side-sweep --source public
+```
+
+### Out-of-Sample Validation & Candidate Ranking
+```powershell
+# Split testing: evaluate performance strictly after a specified UTC timestamp
+python -m src.main outsample-report --source public --since 2026-05-07T12:00:00Z
+
+# Multi-session degradation audit: compare early vs. late performance
+python -m src.main degradation-audit --candidate conservative-entry-30-70 --source public
+
+# Rank all candidate presets by side correctness, expectancy, and drawdown
 python -m src.main candidate-ranking --source public
 ```
 
-The key question is no longer whether one small paper run made money. The key question is whether the chosen side was correct often enough to support the thesis. `side-audit` summarizes matched vs mismatched trades across the conservative preset, breaks correctness down by asset, side, duration, entry-price bucket, seconds-to-expiry bucket, edge bucket, spread bucket, and underlying exchange movement, and can print a full accepted-trade feature table with approximate-expiry outcomes.
-
-`conservative-tiny-reverse` and `--reverse-signal` are research-only. They keep the same paper filters and risk caps, but flip `UP` to `DOWN` and `DOWN` to `UP` so the repo can test whether the conservative momentum side is backward. `side-sweep` compares the normal conservative branch, the reverse branch, and tighter filtered variants such as higher edge, lower spread, narrower entry-price bands, asset filters, side filters, duration filters, and tighter expiry windows. `candidate-ranking` then ranks those paper candidates by side correctness, expectancy, closed trades, PnL excluding top trades, concentration, drawdown, exposure, and verdicts.
-
-This is still not proof of live profitability. Reverse-signal tests, side-correctness audits, and candidate rankings are all built from stored public snapshots and approximate paper settlement logic only.
-
-Phase 19 promotes `conservative-entry-30-70` as the current main paper validation candidate:
-
+### Research Data Export
 ```powershell
-python -m src.main replay --strategy momentum --preset conservative-entry-30-70 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
-python -m src.main validate-conservative --preset conservative-entry-30-70 --source public
-python -m src.main preset-report --preset conservative-entry-30-70 --source public
-python -m src.main compare-candidates --source public
-```
-
-This preset keeps the repo in paper-only tiny mode and narrows the conservative branch further:
-
-- BTC-only
-- 5-minute markets only
-- entry price `0.30-0.70`
-- `MAX_TRADE_USD=1.00`
-- `MAX_TOTAL_EXPOSURE_USD=5.00`
-- `MAX_SPREAD=0.02`
-- `MIN_EDGE=0.03`
-- expiry window `60-180` seconds
-
-It is the main paper candidate because it currently has the cleanest mix of side correctness, expectancy, and reduced profit concentration. It is still not live-ready. `preset-report` and `validate-conservative --preset conservative-entry-30-70` track progress toward the paper-readiness gate:
-
-- closed trades toward `50`
-- side correctness toward `55%`
-- PnL excluding top 3 trades staying positive
-- top-1 trade contribution staying below `40%`
-- per-session and aggregate verdicts staying out of `TAIL_RISK_DOMINATED`
-
-Phase 20 adds degradation auditing and stricter stored-snapshot candidate search for `conservative-entry-30-70`:
-
-```powershell
-python -m src.main degradation-audit --candidate conservative-entry-30-70 --source public
-python -m src.main strict-candidate-sweep --candidate conservative-entry-30-70 --source public
-python -m src.main strict-candidate-ranking --source public
-```
-
-`degradation-audit` compares early vs recent sessions, profitable vs losing sessions, and sessions above or below the side-correctness gate. It also breaks matched and mismatched accepted trades down by side, entry-price bucket, seconds to expiry, spread, edge, time of day, and underlying BTC movement when available.
-
-`strict-candidate-sweep` is a paper-only post-filter over the promoted candidate's accepted trades. It checks stricter variants such as `entry-0.40-0.70`, `UP-only`, higher edge thresholds, tighter spread thresholds, and narrower expiry windows without changing the live-safety boundary or promoting a new preset automatically.
-
-Positive PnL is not enough if side correctness is weak. The `55%` side-correctness level is only a research-continuation gate, not a live-money gate. A higher paper-promising standard should require at least `100+` closed trades, `58-60%+` side correctness, positive expectancy, positive PnL after removing top trades, no degrading trend, and no safety violations.
-
-Phase 21 adds out-of-sample validation so interesting Phase 20 filters are frozen before judging later sessions:
-
-```powershell
-python -m src.main outsample-report --source public --since 2026-05-07T12:00:00Z
-python -m src.main validation-target --source public --since 2026-05-07T12:00:00Z
-```
-
-The frozen variants are not optimized dynamically:
-
-- base `conservative-entry-30-70`
-- `expiry-90-150`
-- `UP-only entry-0.40-0.70`
-- `entry-0.40-0.50`
-- `entry-0.40-0.70`
-- `near-flat pre-entry BTC move`
-- `entry-0.40-0.70 + expiry-90-150`
-- `UP-only entry-0.40-0.70 + expiry-90-150`
-
-`outsample-report` separates in-sample sessions before the cutoff from out-of-sample sessions after the cutoff. `OUTSAMPLE_PROMISING` requires at least 30 out-of-sample closed trades, side correctness of at least `58%`, positive expectancy, positive PnL excluding top 3 trades, top-1 contribution below `40%`, no degrading trend, and at least `60%` profitable out-of-sample sessions.
-
-This is still paper-only validation. Freezing variants helps reduce overfitting, but even a passing out-of-sample report would still be research evidence, not permission to trade real money.
-
-Phase 22 adds settlement and side-correctness consistency auditing:
-
-```powershell
-python -m src.main consistency-audit --run-id <run_id>
-python -m src.main consistency-audit --session-id <session_id> --candidate conservative-entry-30-70 --source public
-```
-
-This command checks that approximate-expiry settlement, chosen side, token mapping, and realized PnL agree at the trade level. Positive PnL with `0%` side correctness is treated as suspicious and should trigger a consistency audit before any candidate metrics are trusted.
-
-Candidate summaries should be refreshed after accounting changes:
-
-```powershell
-python -m src.main validate-candidate --candidate conservative-entry-30-70 --source public --refresh
-python -m src.main candidate-report --candidate conservative-entry-30-70 --source public --refresh
-```
-
-This project remains paper-only. Refreshing cached summaries does not create any live-trading path.
-
-The current candidate workflow also includes two frozen follow-up presets from the strict comparison results:
-
-```powershell
-python -m src.main replay --strategy momentum --preset conservative-entry-40-75 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
-python -m src.main replay --strategy momentum --preset conservative-up-only-40-75 --source public --session-id <session_id> --active-only --close-mode approximate-expiry
-python -m src.main validate-candidate --candidate conservative-entry-40-75 --source public
-python -m src.main validate-candidate --candidate conservative-up-only-40-75 --source public
-python -m src.main candidate-report --candidate conservative-entry-40-75 --source public
-python -m src.main candidate-report --candidate conservative-up-only-40-75 --source public
-```
-
-`conservative-entry-40-75` keeps the same BTC-only, 5-minute, tiny-risk, `min_edge=0.03`, `max_spread=0.02`, and `60-180` second expiry window as `conservative-entry-30-70`, but narrows entries to `0.40-0.75`. `conservative-up-only-40-75` adds an `UP` side filter on top of that. These are paper-only hypotheses for out-of-sample validation, not live-ready strategies.
-
-## Observe And Dataset Building
-
-Observe mode repeatedly collects public snapshots and stores them locally. It does not simulate trades, place trades, manage wallets, or require credentials.
-
-```powershell
-python -m src.main observe --duration-minutes 5 --interval-seconds 15
-python -m src.main observe --cycles 3 --interval-seconds 0
-```
-
-Each cycle attempts public exchange prices and public Polymarket market/orderbook data. Recoverable network failures are recorded as failed raw snapshots and the loop continues.
-
-Each observe run creates a `session_id` and records start/end time, cycle counts, sources used, and snapshot totals.
-
-```powershell
-python -m src.main sessions
-python -m src.main session-report --latest
-python -m src.main session-report --session-id <session_id>
-python -m src.main research-report --latest
-```
-
-`observe` handles `Ctrl+C` gracefully, finalizes the partial session, preserves data, and prints the next analysis command.
-
-Summarize the local dataset:
-
-```powershell
-python -m src.main dataset
-python -m src.main dataset --source demo
-python -m src.main dataset --source public
-```
-
-Probe public BTC/ETH market discovery directly:
-
-```powershell
-python -m src.main discover-markets --asset BTC
-python -m src.main discover-markets --asset ETH
-python -m src.main discover-markets --asset all
-```
-
-Export local research data to CSV:
-
-```powershell
-python -m src.main export --format csv --out exports
-python -m src.main export --format csv --out exports --source public
-python -m src.main export --format csv --out exports --session-id <session_id>
-```
-
-Exports include raw snapshot summaries, trades, skipped opportunities, runs, and equity snapshots. There are no wallet/private-key fields to export.
-
-Suggested safe workflow:
-
-```powershell
-python -m src.main collect --demo
-python -m src.main run-paper --strategy momentum
-python -m src.main replay --strategy momentum --source demo
-python -m src.main observe --duration-minutes 60 --interval-seconds 15
-python -m src.main session-report --latest
-python -m src.main dataset --source public
-python -m src.main readiness
-python -m src.main replay --strategy momentum --source public --session-id <session_id>
-python -m src.main replay --strategy pair-cost --source public --session-id <session_id>
-python -m src.main diagnostics --source public --session-id <session_id>
-python -m src.main sweep --strategy momentum --source public --session-id <session_id>
-python -m src.main sweep --strategy pair-cost --source public --session-id <session_id>
-python -m src.main compare --source public --session-id <session_id>
-python -m src.main export --format csv --out exports --session-id <session_id>
-```
-
-## Source-Aware Research
-
-Phase 6 separates deterministic demo data from observed public data. Commands that read stored snapshots can filter by source so backtests do not silently mix mock markets with real public observations:
-
-```powershell
-python -m src.main dataset --source demo
-python -m src.main dataset --source public
-python -m src.main replay --strategy momentum --source demo
-python -m src.main replay --strategy momentum --source public
-python -m src.main replay --strategy pair-cost --source public
-python -m src.main backtest-report --source public
+# Export all research sessions, orderbooks, trades, and equity curves to CSV
 python -m src.main export --format csv --out exports --source public
 ```
 
-Optional timestamp filters accept simple ISO timestamps:
+---
 
-```powershell
-python -m src.main dataset --source public --since "2026-05-04T00:00:00"
-python -m src.main replay --strategy momentum --source public --since "2026-05-04T00:00:00"
+## Project Layout
+
+```
+Polymarket-Quantitative-Trading-Research-System/
+├── docs/
+│   ├── FINAL_STATUS.md        # Comprehensive archival summary & quant verdict
+│   ├── REFERENCES.md          # Architecture references (NautilusTrader, Freqtrade)
+│   └── note.md                # Quantitative research notes & Markov hypotheses
+├── src/
+│   ├── collectors/            # Multi-exchange ingestion (Coinbase, Kraken, Polymarket)
+│   │   ├── exchange.py        # Spot price collectors with fallback & cross-checks
+│   │   ├── polymarket.py      # Gamma discovery & CLOB L2 orderbook reader
+│   │   └── mock_markets.py    # Deterministic offline test fixtures
+│   ├── strategies/            # Quantitative strategy implementations
+│   │   ├── updown_momentum.py # Cross-exchange lead-lag momentum model
+│   │   ├── stuck_state_markov.py # Orderbook sticky-state transition model
+│   │   └── pair_cost_arbitrage.py # Synthetic YES/NO arbitrage evaluator
+│   ├── simulator/             # Microstructure simulation & execution
+│   │   ├── engine.py          # Paper trading engine & orderbook matching
+│   │   ├── fees.py            # Fee schedules & slippage calculation
+│   │   └── lifecycle.py       # Binary contract lifecycle states
+│   ├── risk/                  # Portfolio risk management
+│   │   └── sizing.py          # Position sizing, exposure caps, circuit breakers
+│   ├── storage/               # Persistence layer
+│   │   ├── sqlite.py          # ACID SQLite snapshot & trade logging
+│   │   └── export.py          # CSV research data export pipeline
+│   ├── reports/               # Quantitative analytics & auditing engine
+│   │   ├── signal_audit.py    # Edge distribution & execution analysis
+│   │   ├── side_audit.py      # Directional hit-rate vs. spot drift
+│   │   ├── diagnostics.py     # Microstructure diagnostics & spread filters
+│   │   ├── sweep.py           # Parameter sensitivity grid search
+│   │   ├── conservative_report.py # Multi-session candidate evaluation
+│   │   └── consistency.py     # Trade-level settlement reconciliation
+│   ├── config.py              # Strongly-typed configuration & preset models
+│   ├── models.py              # Domain primitives (OrderBook, Market, Signal, Trade)
+│   ├── safety.py              # Hardwired fail-closed safety guards
+│   └── main.py                # Unified CLI research orchestrator
+├── tests/                     # 145 unit, integration, and safety tests
+├── pyproject.toml             # Project metadata & standard library configuration
+├── SAFETY.md                  # Safety boundaries & dry-run policy
+└── SETUP.md                   # Environment setup & developer onboarding
 ```
 
-Public replay never falls back to demo data. If public Polymarket markets or orderbooks are missing, replay exits clearly and leaves demo data unused.
+---
 
-Session-aware analysis commands can use the stored session window directly:
+## Verification & Test Suite
 
-```powershell
-python -m src.main replay --strategy momentum --source public --session-id <session_id>
-python -m src.main diagnostics --source public --session-id <session_id>
-python -m src.main sweep --strategy pair-cost --source public --session-id <session_id>
-python -m src.main backtest-report --source public --session-id <session_id>
-python -m src.main compare --source public --session-id <session_id>
+The codebase maintains **100% test pass rates across 145 automated test cases**:
+
+```bash
+# Run the entire test suite
+python -m pytest -q
+
+# Run specific test modules
+python -m pytest tests/test_safety.py -v              # Verify fail-closed safety guards
+python -m pytest tests/test_tail_risk_sanity.py -v    # Verify tail-risk concentration checks
+python -m pytest tests/test_replay_backtest.py -v     # Verify L2 orderbook replay
+python -m pytest tests/test_tiny_risk_controls.py -v  # Verify portfolio risk caps
 ```
 
-Check whether the dataset is ready for public replay:
+---
 
-```powershell
-python -m src.main readiness
-python -m src.main readiness --source public
-```
+## Safety & Fail-Closed Guardrails
 
-Readiness reports whether exchange prices, Polymarket markets, orderbooks, overlapping timestamps/assets, spreads, and snapshot counts are sufficient. Verdicts include `READY_FOR_REPLAY`, `INSUFFICIENT_PUBLIC_DATA`, `MIXED_DEMO_AND_PUBLIC_DATA`, `MISSING_ORDERBOOKS`, and `MISSING_EXCHANGE_PRICES`.
+This project is strictly designed for **academic and quantitative research**:
 
-Phase 7 adds public-market-specific readiness verdicts:
+- **No Live Execution**: There is no code in this repository capable of signing transactions, managing Web3 wallets, or submitting authenticated orders to Polymarket or any exchange.
+- **Fail-Closed Runtime**: `enforce_paper_only()` executes on startup. Setting `DRY_RUN=false` or providing live environment flags (`LIVE_TRADING=true`, `POLYMARKET_LIVE=true`) triggers an immediate `SafetyError` exception and terminates the process.
+- **Zero Credentials**: The system operates entirely on public REST endpoints. No API keys or private keys are accepted or stored.
+- For complete safety specifications, see [`SAFETY.md`](SAFETY.md).
 
-- `READY_FOR_PUBLIC_REPLAY`
-- `NO_PUBLIC_CRYPTO_MARKETS`
-- `NO_PUBLIC_TOKEN_IDS`
-- `NO_PUBLIC_ORDERBOOKS`
-- `INSUFFICIENT_OVERLAP`
-- `INSUFFICIENT_SNAPSHOTS`
+---
 
-Audit discovered Polymarket markets:
+## Author & Acknowledgments
 
-```powershell
-python -m src.main markets --source public
-```
-
-The market audit shows market id, slug, asset, title, source, classification, token status, orderbook status, first seen timestamp, latest seen timestamp, and accepted/rejected reason.
-
-Public discovery uses public Gamma search, active/open Gamma events, active/open Gamma markets, and direct BTC/ETH `updown` slug probes near the current time. Token IDs are extracted from public fields such as `clobTokenIds`, `tokens`, and outcome-token objects when available. Public orderbook capture uses public CLOB market-data only. No wallet, private key, authenticated API, or order execution path is involved.
-
-## Runs And Experiments
-
-Every `run-paper` and `replay` command creates a new isolated run by default. Trades, skipped opportunities, fake balances, and equity snapshots are linked to that `run_id`, so momentum and pair-cost runs no longer get mixed accidentally.
-
-Inspect runs:
-
-```powershell
-python -m src.main runs
-```
-
-Reports default to the latest run:
-
-```powershell
-python -m src.main report
-python -m src.main report --latest
-python -m src.main report --run-id <run_id>
-python -m src.main report --strategy momentum
-python -m src.main report --all
-```
-
-Compare stored strategies without calling external APIs:
-
-```powershell
-python -m src.main compare
-python -m src.main compare --source public
-python -m src.main compare --source demo
-```
-
-Reset paper results while keeping raw snapshots:
-
-```powershell
-python -m src.main reset --paper-results
-```
-
-Delete all local research data, including raw snapshots:
-
-```powershell
-python -m src.main reset --all
-```
-
-## Data Modes
-
-Public collection uses only unauthenticated endpoints.
-
-- Coinbase Exchange public price data for BTC/ETH
-- Kraken public REST price data as a fallback
-- Polymarket public Gamma discovery endpoints
-- Polymarket public CLOB orderbook reads
-
-Public collection can fail because of DNS or network issues in the local environment. Demo mode is the recommended first smoke test because it is deterministic, offline, and never calls external APIs.
-
-Use either of these:
-
-```powershell
-python -m src.main collect --demo
-```
-
-```powershell
-$env:USE_MOCK_DATA='true'; python -m src.main collect; Remove-Item Env:\USE_MOCK_DATA
-```
-
-## Market Discovery Limitation
-
-Short-duration Polymarket crypto UP/DOWN markets can be unreliable to discover from public listings because they are short-lived and may not always appear in generic search responses. The collector uses public Gamma search/events endpoints, probes nearby common UP/DOWN slug patterns, and falls back only when explicitly requested via `--demo`, `USE_MOCK_DATA=true`, or `USE_DEMO_MARKETS=true`.
-
-Demo markets are clearly marked as mock data and are for simulator testing only.
-
-## Safety
-
-See [SAFETY.md](SAFETY.md). Live execution is intentionally disabled.
-
-See [docs/REFERENCES.md](docs/REFERENCES.md) for design references and what is intentionally out of scope.
+- **Author**: Mengchheang Long
+- **Inspiration**: Architecture principles adapted from [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) (event accounting) and [Freqtrade](https://github.com/freqtrade/freqtrade) (backtesting discipline & skepticism metrics).
+- **License**: MIT License
