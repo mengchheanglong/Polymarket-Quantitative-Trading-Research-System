@@ -8,6 +8,8 @@
 [![Safety](https://img.shields.io/badge/execution-paper--only%20(fail--closed)-critical.svg?style=flat)](SAFETY.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat)](LICENSE)
 
+> **GitHub Repository Description:** Institutional-grade, zero-dependency quantitative research & microstructure simulation engine for Polymarket BTC/ETH binary prediction markets with out-of-sample statistical auditing.
+
 An institutional-grade, zero-dependency quantitative research framework, microstructure simulation engine, and out-of-sample statistical validation platform for **Polymarket crypto binary prediction markets** (BTC/ETH 5-minute and 15-minute UP/DOWN contracts).
 
 Built with **pure standard library Python 3.11+**, this platform provides end-to-end capabilities: high-frequency public market data ingestion (Coinbase, Kraken, Polymarket CLOB), realistic orderbook fill and slippage simulation, risk controls, multi-strategy backtesting, automated tail-risk auditing, and rigorous out-of-sample hypothesis testing.
@@ -362,8 +364,7 @@ This project is strictly designed for **academic and quantitative research**:
 
 ---
 
-## Author & Acknowledgments
+## Acknowledgments & License
 
-- **Author**: Mengchheang Long
-- **Inspiration**: Architecture principles adapted from [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) (event accounting) and [Freqtrade](https://github.com/freqtrade/freqtrade) (backtesting discipline & skepticism metrics).
+- **Architecture Inspiration**: Principles adapted from [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) (event accounting) and [Freqtrade](https://github.com/freqtrade/freqtrade) (backtesting discipline & skepticism metrics).
 - **License**: MIT License
